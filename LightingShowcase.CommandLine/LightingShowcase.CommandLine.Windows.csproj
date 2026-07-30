@@ -26,6 +26,13 @@
   </ItemGroup>
 
 
+  <!-- Prevent a stale pre-portability adapter from being auto-compiled when
+       this source tree is copied over an older checkout. Raster renderers now
+       return RenderImage and are invoked directly by RenderJobRunner. -->
+  <ItemGroup>
+    <Compile Remove="WindowsRasterCommandLineRenderer.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="../Shaders/vulkan_scene_primary.comp"
           Link="Shaders/vulkan_scene_primary.comp"

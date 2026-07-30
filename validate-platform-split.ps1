@@ -67,6 +67,7 @@ if ($runnerSource -match '#if\s+WINDOWS|PlatformNotSupportedException|WindowsRas
 }
 Assert-Contains 'LightingShowcase.CommandLine/RenderJobRunner.cs' 'ShadowRasterRenderer.Render'
 Assert-Contains 'LightingShowcase.CommandLine/RenderJobRunner.cs' 'VulkanRasterRenderer.Render'
+Assert-Contains 'LightingShowcase.CommandLine/LightingShowcase.CommandLine.Windows.csproj' '<Compile Remove="WindowsRasterCommandLineRenderer.cs" />'
 
 
 $rendererRequest = Get-Content -LiteralPath 'LightingShowcase.CommandLine/RenderRequest.cs' -Raw

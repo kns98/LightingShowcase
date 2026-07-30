@@ -91,6 +91,8 @@ fi
 
 grep -Fq 'ShadowRasterRenderer.Render' LightingShowcase.CommandLine/RenderJobRunner.cs   || fail "software raster renderer is not wired into the portable CLI"
 grep -Fq 'VulkanRasterRenderer.Render' LightingShowcase.CommandLine/RenderJobRunner.cs   || fail "Vulkan raster renderer is not wired into the portable CLI"
+grep -Fq '<Compile Remove="WindowsRasterCommandLineRenderer.cs" />' LightingShowcase.CommandLine/LightingShowcase.CommandLine.Windows.csproj \
+  || fail "Windows CLI does not exclude the obsolete bitmap raster adapter"
 
 # The CLI must expose exactly the four supported renderer families.
 for renderer in raster raster-vulkan vulkan cpu; do
