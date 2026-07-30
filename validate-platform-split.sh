@@ -46,6 +46,13 @@ grep -Fq 'LightingShowcase.CommandLine\LightingShowcase.CommandLine.Windows.cspr
 grep -Fq 'LightingShowcase.CommandLine/LightingShowcase.CommandLine.Windows.csproj' LightingShowcase.Windows.csproj \
   || fail "Windows desktop project does not reference the Windows CLI project"
 
+grep -Fq '<Compile Remove="LightingShowcase.Preview.Linux\**\*.cs" />' LightingShowcase.Windows.csproj \
+  || fail "Windows desktop project does not exclude Linux preview source files"
+
+if grep -nF 'LightingShowcase.Preview.Linux' LightingShowcase.Windows.sln; then
+  fail "Windows solution must not include the Linux preview project"
+fi
+
 for file in "${windows_files[@]}"; do
   if grep -nE 'LightingShowcase\.CommandLine\.Linux\.csproj|LightingShowcase\.Linux\.sln' "$file"; then
     fail "a Windows build entry point contains a Linux project reference"

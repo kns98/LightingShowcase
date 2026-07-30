@@ -86,6 +86,10 @@
     <Compile Remove="Rendering\ShadowRasterRenderer.cs" />
     <Compile Remove="Rendering\VulkanRasterRenderer.cs" />
     <Compile Remove="LightingShowcase.CommandLine\**\*.cs" />
+    <!-- The Linux Avalonia preview is a separate project. Because this desktop
+         project lives at the repository root, SDK default globs would otherwise
+         compile every preview .cs file into the Windows executable. -->
+    <Compile Remove="LightingShowcase.Preview.Linux\**\*.cs" />
     <Compile Remove="LightingShowcase.ImportExport.*\**\*.cs" />
     <Compile Remove="LightingShowcase.ObjectLibrary.*\**\*.cs" />
     <Compile Remove="LightingShowcase.Core\**\*.cs" />
@@ -99,18 +103,21 @@
     <EmbeddedResource Remove="LightingShowcase.ObjectLibrary.*\**\*" />
     <EmbeddedResource Remove="LightingShowcase.Core\**\*" />
     <EmbeddedResource Remove="LightingShowcase.CommandLine\**\*" />
+    <EmbeddedResource Remove="LightingShowcase.Preview.Linux\**\*" />
     <EmbeddedResource Remove="**\bin\**\*;**\obj\**\*" />
 
     <None Remove="LightingShowcase.ImportExport.*\**\*" />
     <None Remove="LightingShowcase.ObjectLibrary.*\**\*" />
     <None Remove="LightingShowcase.Core\**\*" />
     <None Remove="LightingShowcase.CommandLine\**\*" />
+    <None Remove="LightingShowcase.Preview.Linux\**\*" />
     <None Remove="**\bin\**\*;**\obj\**\*" />
 
     <Content Remove="LightingShowcase.ImportExport.*\**\*" />
     <Content Remove="LightingShowcase.ObjectLibrary.*\**\*" />
     <Content Remove="LightingShowcase.Core\**\*" />
     <Content Remove="LightingShowcase.CommandLine\**\*" />
+    <Content Remove="LightingShowcase.Preview.Linux\**\*" />
     <Content Remove="**\bin\**\*;**\obj\**\*" />
   </ItemGroup>
 

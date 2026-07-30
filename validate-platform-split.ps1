@@ -42,6 +42,8 @@ $windowsFiles + $linuxFiles | ForEach-Object { Assert-Exists $_ }
 
 Assert-Contains 'LightingShowcase.Windows.sln' 'LightingShowcase.CommandLine\LightingShowcase.CommandLine.Windows.csproj'
 Assert-Contains 'LightingShowcase.Windows.csproj' 'LightingShowcase.CommandLine/LightingShowcase.CommandLine.Windows.csproj'
+Assert-Contains 'LightingShowcase.Windows.csproj' '<Compile Remove="LightingShowcase.Preview.Linux\**\*.cs" />'
+Assert-DoesNotContain 'LightingShowcase.Windows.sln' 'LightingShowcase.Preview.Linux'
 
 foreach ($file in $windowsFiles) {
     Assert-DoesNotContain $file 'LightingShowcase.CommandLine.Linux.csproj'
