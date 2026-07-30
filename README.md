@@ -44,12 +44,14 @@ Use `--renderer` to select one of the four command-line rendering modes.
 
 | CLI value | Renderer | Windows | Linux/macOS |
 |---|---|:---:|:---:|
-| `raster` | Software/CPU z-buffer rasterizer with shadow maps | Yes | No |
-| `raster-vulkan` | Vulkan graphics-pipeline hardware rasterizer | Yes | No |
+| `raster` | Software/CPU z-buffer rasterizer with shadow maps | Yes | Yes |
+| `raster-vulkan` | Vulkan graphics-pipeline hardware rasterizer | Yes | Yes |
 | `vulkan` | Vulkan compute BVH ray/path tracer | Yes | Yes |
 | `cpu` | CPU ray/path tracer | Yes | Yes |
 
-`vulkan` is the default. Vulkan modes require a working Vulkan runtime, graphics driver, and compatible device. Use `cpu` when Vulkan is unavailable.
+`vulkan` is the default. Vulkan modes require a working Vulkan runtime, graphics driver, and compatible device. Use `cpu` or `raster` when Vulkan is unavailable.
+
+Both rasterizers use the shared cross-platform `RenderImage` RGBA buffer. `System.Drawing.Bitmap` conversion is confined to the Windows desktop UI, so the command-line raster paths do not require WinForms or `System.Drawing.Common`.
 
 ## Requirements
 
@@ -62,7 +64,7 @@ Use `--renderer` to select one of the four command-line rendering modes.
 ### Linux
 
 - .NET 8 SDK to build, or .NET 8 Runtime to run a framework-dependent release
-- Vulkan loader and compatible driver for the `vulkan` renderer
+- Vulkan loader and compatible driver for the `raster-vulkan` and `vulkan` renderers
 
 The included setup script installs the .NET SDK and common Vulkan packages on apt-based Linux distributions:
 
@@ -72,7 +74,7 @@ The included setup script installs the .NET SDK and common Vulkan packages on ap
 
 #### Linux Vulkan preflight: missing `libdl`
 
-On some Ubuntu installations, the Vulkan renderer can fail during the isolated Veldrid preflight with an error similar to:
+On some Ubuntu installations, either Vulkan renderer (`raster-vulkan` or `vulkan`) can fail during the isolated Veldrid preflight with an error similar to:
 
 ```text
 System.DllNotFoundException: Unable to load shared library 'libdl'
@@ -129,7 +131,7 @@ LIGHTINGSHOWCASE_VERBOSE_ERRORS=1 \
 ### macOS
 
 - .NET 8 SDK to build, or .NET 8 Runtime to run a framework-dependent release
-- A working Vulkan implementation for the `vulkan` renderer
+- A working Vulkan implementation for the `raster-vulkan` and `vulkan` renderers
 
 The Windows desktop editor is not built for Linux or macOS. Those platforms use the command-line project.
 
@@ -150,7 +152,11 @@ The Windows desktop editor is not built for Linux or macOS. Those platforms use 
 ### Run from source on Linux or macOS
 
 ```bash
-sh ./LightingShowcase.CommandLine/render.sh ./scenes/room.gltf --renderer cpu --output ./room.png
+# Software rasterizer; no Vulkan device required
+sh ./LightingShowcase.CommandLine/render.sh ./scenes/room.gltf --renderer raster --output ./room-raster.png
+
+# Vulkan graphics-pipeline rasterizer
+sh ./LightingShowcase.CommandLine/render.sh ./scenes/room.gltf --renderer raster-vulkan --output ./room-raster-vulkan.png
 ```
 
 The explicit `render` command is optional. These forms are equivalent:
@@ -364,7 +370,7 @@ Shaders/                               Vulkan compute shaders
 
 ## Validation
 
-Platform-reference checks are included to prevent the Windows solution or Windows scripts from accidentally referencing the Linux command-line project:
+Platform-reference and renderer-portability checks verify the solution split, confirm both rasterizers are compiled into the shared core, and reject any reintroduction of `System.Drawing` into the portable raster paths:
 
 ```powershell
 .\validate-platform-split.ps1

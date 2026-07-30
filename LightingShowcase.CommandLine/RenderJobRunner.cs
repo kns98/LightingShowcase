@@ -25,9 +25,7 @@ public sealed class RenderJobRunner
     public static void DisposeSharedResources()
     {
         VulkanSceneComputeRenderer.DisposeSharedDevice();
-#if WINDOWS
-        WindowsRasterCommandLineRenderer.DisposeSharedResources();
-#endif
+        VulkanRasterRenderer.DisposeSharedDevice();
     }
 
     public async Task<RenderJobResult> RunAsync(RenderRequest request, CancellationToken cancellationToken)
@@ -102,22 +100,29 @@ public sealed class RenderJobRunner
                 break;
             }
             case RenderBackend.ShadowRasterPreview:
-            case RenderBackend.VulkanRasterPreview:
             {
-#if WINDOWS
-                details = WindowsRasterCommandLineRenderer.Render(
-                    request.Backend,
+                RenderImage image = ShadowRasterRenderer.Render(
                     scene,
-                    camera,
+                    camera.Position,
+                    camera.ToBasis(),
                     request.Width,
                     request.Height,
-                    outputPath,
-                    cancellationToken);
-#else
-                throw new PlatformNotSupportedException(
-                    $"The '{rendererName}' renderer requires the Windows command-line build. " +
-                    "Use --renderer vulkan or --renderer cpu on this platform.");
-#endif
+                    cancellationToken,
+                    out details);
+                image.SavePng(outputPath);
+                break;
+            }
+            case RenderBackend.VulkanRasterPreview:
+            {
+                RenderImage image = VulkanRasterRenderer.Render(
+                    scene,
+                    camera.Position,
+                    camera.ToBasis(),
+                    request.Width,
+                    request.Height,
+                    cancellationToken,
+                    out details);
+                image.SavePng(outputPath);
                 break;
             }
             default:

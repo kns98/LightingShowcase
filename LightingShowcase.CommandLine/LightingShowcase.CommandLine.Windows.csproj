@@ -25,10 +25,6 @@
     <ProjectReference Include="../LightingShowcase.ObjectLibrary.ReadyMade/LightingShowcase.ObjectLibrary.ReadyMade.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Include="../Rendering/ShadowRasterRenderer.cs" Link="Rendering/ShadowRasterRenderer.cs" />
-    <Compile Include="../Rendering/VulkanRasterRenderer.cs" Link="Rendering/VulkanRasterRenderer.cs" />
-  </ItemGroup>
 
   <ItemGroup>
     <None Include="../Shaders/vulkan_scene_primary.comp"

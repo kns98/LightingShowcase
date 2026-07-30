@@ -76,6 +76,22 @@ if grep -n '\\' \
 fi
 
 
+# Both rasterizers must live in the portable core and must not depend on
+# System.Drawing. The CLI execution path must not hide them behind WINDOWS.
+for renderer_file in Rendering/ShadowRasterRenderer.cs Rendering/VulkanRasterRenderer.cs; do
+  grep -Fq "../$renderer_file" LightingShowcase.Core/LightingShowcase.Core.csproj     || fail "shared core does not include $renderer_file"
+  if grep -nE 'System\.Drawing|\bBitmap\b|LockBits' "$renderer_file"; then
+    fail "$renderer_file still depends on the Windows bitmap stack"
+  fi
+done
+
+if grep -nE '#if[[:space:]]+WINDOWS|PlatformNotSupportedException|WindowsRasterCommandLineRenderer'   LightingShowcase.CommandLine/RenderJobRunner.cs; then
+  fail "command-line raster execution is still Windows-gated"
+fi
+
+grep -Fq 'ShadowRasterRenderer.Render' LightingShowcase.CommandLine/RenderJobRunner.cs   || fail "software raster renderer is not wired into the portable CLI"
+grep -Fq 'VulkanRasterRenderer.Render' LightingShowcase.CommandLine/RenderJobRunner.cs   || fail "Vulkan raster renderer is not wired into the portable CLI"
+
 # The CLI must expose exactly the four supported renderer families.
 for renderer in raster raster-vulkan vulkan cpu; do
   grep -Fq "$renderer" LightingShowcase.CommandLine/RenderRequest.cs \

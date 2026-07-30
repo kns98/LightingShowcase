@@ -53,6 +53,22 @@ foreach ($file in $linuxFiles) {
 }
 
 
+foreach ($rendererFile in @('Rendering/ShadowRasterRenderer.cs', 'Rendering/VulkanRasterRenderer.cs')) {
+    Assert-Contains 'LightingShowcase.Core/LightingShowcase.Core.csproj' "../$rendererFile"
+    $rendererSource = Get-Content -LiteralPath $rendererFile -Raw
+    if ($rendererSource -match 'System\.Drawing|\bBitmap\b|LockBits') {
+        throw "Platform split validation failed: $rendererFile still depends on the Windows bitmap stack"
+    }
+}
+
+$runnerSource = Get-Content -LiteralPath 'LightingShowcase.CommandLine/RenderJobRunner.cs' -Raw
+if ($runnerSource -match '#if\s+WINDOWS|PlatformNotSupportedException|WindowsRasterCommandLineRenderer') {
+    throw 'Platform split validation failed: command-line raster execution is still Windows-gated'
+}
+Assert-Contains 'LightingShowcase.CommandLine/RenderJobRunner.cs' 'ShadowRasterRenderer.Render'
+Assert-Contains 'LightingShowcase.CommandLine/RenderJobRunner.cs' 'VulkanRasterRenderer.Render'
+
+
 $rendererRequest = Get-Content -LiteralPath 'LightingShowcase.CommandLine/RenderRequest.cs' -Raw
 foreach ($renderer in @('raster', 'raster-vulkan', 'vulkan', 'cpu')) {
     if (-not $rendererRequest.Contains($renderer)) {

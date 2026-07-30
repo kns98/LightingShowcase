@@ -5,12 +5,10 @@
 // This renderer is intentionally separate from VulkanSceneComputeRenderer.  It
 // uses Vulkan's normal vertex/fragment raster pipeline for fast preview frames:
 // vertex buffer -> depth-tested triangle rasterization -> fragment lighting ->
-// off-screen color texture -> staging readback -> WinForms bitmap.
+// off-screen color texture -> staging readback -> cross-platform RGBA image.
 // -----------------------------------------------------------------------------
 
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -261,8 +259,8 @@ public static class VulkanRasterRenderer
         }
     }
 
-    /// <summary>Renders one hardware-rasterized preview frame into a 32-bit ARGB bitmap.</summary>
-    public static Bitmap Render(
+    /// <summary>Renders one hardware-rasterized preview frame into a cross-platform RGBA image.</summary>
+    public static RenderImage Render(
         Scene scene,
         Vec3 cameraPosition,
         CameraBasis basis,
@@ -282,8 +280,8 @@ public static class VulkanRasterRenderer
         }
     }
 
-    /// <summary>Renders one hardware-rasterized preview frame into a 32-bit ARGB bitmap.</summary>
-    private static Bitmap RenderLocked(
+    /// <summary>Renders one hardware-rasterized preview frame into a cross-platform RGBA image.</summary>
+    private static RenderImage RenderLocked(
         Scene scene,
         Vec3 cameraPosition,
         CameraBasis basis,
@@ -429,12 +427,12 @@ public static class VulkanRasterRenderer
         gd.WaitForIdle();
 
         ThrowIfCancellationRequested(cancellationToken, "read back Vulkan raster texture");
-        Bitmap bitmap = ReadBackBitmap(gd, stagingTexture, width, height);
+        RenderImage image = ReadBackImage(gd, stagingTexture, width, height);
 
         stopwatch.Stop();
         details = $"VULKAN RASTER PREVIEW OK - {width}x{height}, triangles={geometry.TotalTriangles}, opaque={geometry.OpaqueVertices.Length / 3}, transparent={geometry.TransparentVertices.Length / 3}, nearClipped={geometry.NearClippedTriangles}, lights={lights.Length}, textures={textures.TextureCount}, texMode={(useGpuTextureSampling ? "gpu-atlas" : "baked-vertex")}, debug={DebugModeName(debugMode)}, materials={geometry.Materials.Length}, far={cameraFar:0.###}, cpuZParity=true, materialBuffer={useGpuTextureSampling}, frame={stopwatch.ElapsedMilliseconds}ms";
         Stage("Vulkan raster render completed successfully");
-        return bitmap;
+        return image;
     }
 
     private static GraphicsDevice GetOrCreateSharedDevice()
@@ -899,46 +897,33 @@ public static class VulkanRasterRenderer
         return texturePlacements.TryGetValue(texture, out RasterTexturePlacement placement) ? placement : RasterTexturePlacement.None;
     }
 
-    private static Bitmap ReadBackBitmap(GraphicsDevice gd, Texture stagingTexture, int width, int height)
+    private static RenderImage ReadBackImage(GraphicsDevice gd, Texture stagingTexture, int width, int height)
     {
-        Bitmap bitmap = new(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        uint[] pixels = new uint[checked(width * height)];
+        byte[] sourceRow = new byte[checked(width * 4)];
         MappedResource mapped = gd.Map(stagingTexture, MapMode.Read);
         try
         {
-            BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            try
+            for (int y = 0; y < height; y++)
             {
-                byte[] sourceRow = new byte[width * 4];
-                byte[] destRow = new byte[width * 4];
-                for (int y = 0; y < height; y++)
+                IntPtr source = IntPtr.Add(mapped.Data, checked((int)(y * mapped.RowPitch)));
+                Marshal.Copy(source, sourceRow, 0, sourceRow.Length);
+                int destination = y * width;
+                for (int x = 0; x < width; x++)
                 {
-                    IntPtr source = IntPtr.Add(mapped.Data, checked((int)(y * mapped.RowPitch)));
-                    Marshal.Copy(source, sourceRow, 0, sourceRow.Length);
-                    for (int x = 0; x < width; x++)
-                    {
-                        int i = x * 4;
-                        byte r = sourceRow[i + 0];
-                        byte g = sourceRow[i + 1];
-                        byte b = sourceRow[i + 2];
-                        byte a = sourceRow[i + 3];
-                        destRow[i + 0] = b;
-                        destRow[i + 1] = g;
-                        destRow[i + 2] = r;
-                        destRow[i + 3] = 255;
-                    }
-                    Marshal.Copy(destRow, 0, data.Scan0 + y * data.Stride, destRow.Length);
+                    int i = x * 4;
+                    byte r = sourceRow[i + 0];
+                    byte g = sourceRow[i + 1];
+                    byte b = sourceRow[i + 2];
+                    pixels[destination + x] = (uint)r | ((uint)g << 8) | ((uint)b << 16) | 0xff000000u;
                 }
-            }
-            finally
-            {
-                bitmap.UnlockBits(data);
             }
         }
         finally
         {
             gd.Unmap(stagingTexture);
         }
-        return bitmap;
+        return new RenderImage(width, height, pixels);
     }
 
     private static void ResetStageLog(int width, int height)

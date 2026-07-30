@@ -83,6 +83,8 @@
     <Compile Remove="Rendering\PngWriter.cs" />
     <Compile Remove="Rendering\VeldridVulkanDevicePreflight.cs" />
     <Compile Remove="Rendering\VulkanSceneComputeRenderer.cs" />
+    <Compile Remove="Rendering\ShadowRasterRenderer.cs" />
+    <Compile Remove="Rendering\VulkanRasterRenderer.cs" />
     <Compile Remove="LightingShowcase.CommandLine\**\*.cs" />
     <Compile Remove="LightingShowcase.ImportExport.*\**\*.cs" />
     <Compile Remove="LightingShowcase.ObjectLibrary.*\**\*.cs" />

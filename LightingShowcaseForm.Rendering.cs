@@ -598,7 +598,7 @@ public sealed partial class LightingShowcaseForm
                     height,
                     cancellationToken,
                     out string completedRenderDetails,
-                    interactiveFast);
+                    interactiveFast).ToBitmap();
 
                 return new ShadowRasterPreviewTaskResult(output, completedRenderDetails, previewCache, contentRevisionAtStart, requestedRevision, displayWidth, displayHeight, interactiveFast);
             }
@@ -769,7 +769,7 @@ public sealed partial class LightingShowcaseForm
                     width,
                     height,
                     cancellationToken,
-                    out string completedRenderDetails);
+                    out string completedRenderDetails).ToBitmap();
 
                 return new VulkanRasterPreviewTaskResult(output, completedRenderDetails, requestedRevision, displayWidth, displayHeight, interactiveOrbit);
             }

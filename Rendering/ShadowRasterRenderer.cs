@@ -10,9 +10,6 @@
 // -----------------------------------------------------------------------------
 
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using System.Threading;
 using LightingShowcase.CameraSystem;
 using LightingShowcase.Lighting;
@@ -65,8 +62,8 @@ public static class ShadowRasterRenderer
         return new PreviewCache(scene, shadowMaps, stopwatch.ElapsedMilliseconds);
     }
 
-    /// <summary>Renders one shaded raster preview frame into a 32-bit ARGB bitmap.</summary>
-    public static Bitmap Render(
+    /// <summary>Renders one shaded raster preview frame into a cross-platform RGBA image.</summary>
+    public static RenderImage Render(
         Scene scene,
         Vec3 cameraPosition,
         CameraBasis cameraBasis,
@@ -80,7 +77,7 @@ public static class ShadowRasterRenderer
     }
 
     /// <summary>Renders one shaded raster preview frame using a reusable shadow-map cache.</summary>
-    public static Bitmap Render(
+    public static RenderImage Render(
         PreviewCache cache,
         Vec3 cameraPosition,
         CameraBasis cameraBasis,
@@ -100,33 +97,20 @@ public static class ShadowRasterRenderer
         if (interactiveFast && lights.Length > MaxInteractiveLights)
             lights = lights.Take(MaxInteractiveLights).ToArray();
 
-        Bitmap bitmap = new(width, height, PixelFormat.Format32bppArgb);
-        double[] zBuffer = new double[width * height];
+        uint[] pixels = new uint[checked(width * height)];
+        double[] zBuffer = new double[pixels.Length];
         Array.Fill(zBuffer, double.PositiveInfinity);
+        ClearBackground(pixels, width, height);
 
-        BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-        try
+        foreach (Triangle tri in scene.Triangles)
         {
-            int byteCount = data.Stride * height;
-            byte[] bytes = new byte[byteCount];
-            ClearBackground(bytes, data.Stride, width, height);
-
-            foreach (Triangle tri in scene.Triangles)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                RasterizeTriangle(bytes, data.Stride, zBuffer, width, height, tri, cameraPosition, cameraBasis, lights, interactiveFast);
-            }
-
-            Marshal.Copy(bytes, 0, data.Scan0, byteCount);
-        }
-        finally
-        {
-            bitmap.UnlockBits(data);
+            cancellationToken.ThrowIfCancellationRequested();
+            RasterizeTriangle(pixels, zBuffer, width, height, tri, cameraPosition, cameraBasis, lights, interactiveFast);
         }
 
         stopwatch.Stop();
         details = $"Shadow raster {(interactiveFast ? "20fps preview" : "OK")} - {width}x{height}, triangles={cache.TriangleCount}, lights={(interactiveFast ? lights.Length : cache.LightCount)}, shadowMaps={cache.EnabledShadowMapCount}, cache={cache.BuildMilliseconds}ms, frame={stopwatch.ElapsedMilliseconds}ms";
-        return bitmap;
+        return new RenderImage(width, height, pixels);
     }
 
     private static PreparedLight[] PrepareLights(Scene scene, IReadOnlyList<ShadowMap> shadowMaps)
@@ -159,30 +143,24 @@ public static class ShadowRasterRenderer
         return prepared.ToArray();
     }
 
-    private static void ClearBackground(byte[] bytes, int stride, int width, int height)
+    private static void ClearBackground(uint[] pixels, int width, int height)
     {
         for (int y = 0; y < height; y++)
         {
             double t = height <= 1 ? 0.0 : y / (double)(height - 1);
             Vec3 color = Vec3.Lerp(new Vec3(0.055, 0.060, 0.074), new Vec3(0.010, 0.012, 0.016), t);
-            int row = y * stride;
-            byte r = ToByte(Gamma(color.X));
-            byte g = ToByte(Gamma(color.Y));
-            byte b = ToByte(Gamma(color.Z));
-            for (int x = 0; x < width; x++)
-            {
-                int i = row + x * 4;
-                bytes[i + 0] = b;
-                bytes[i + 1] = g;
-                bytes[i + 2] = r;
-                bytes[i + 3] = 255;
-            }
+            uint packed = PackRgba(
+                ToByte(Gamma(color.X)),
+                ToByte(Gamma(color.Y)),
+                ToByte(Gamma(color.Z)),
+                255);
+            int row = y * width;
+            Array.Fill(pixels, packed, row, width);
         }
     }
 
     private static void RasterizeTriangle(
-        byte[] bytes,
-        int stride,
+        uint[] pixels,
         double[] zBuffer,
         int width,
         int height,
@@ -226,7 +204,7 @@ public static class ShadowRasterRenderer
         for (int y = minY; y <= maxY; y++)
         {
             double py = y + 0.5;
-            int row = y * stride;
+            int row = y * width;
             for (int x = minX; x <= maxX; x++)
             {
                 double px = x + 0.5;
@@ -261,11 +239,11 @@ public static class ShadowRasterRenderer
                 }
                 zBuffer[pixel] = depth;
 
-                int i = row + x * 4;
-                bytes[i + 0] = ToByte(Gamma(shaded.Z));
-                bytes[i + 1] = ToByte(Gamma(shaded.Y));
-                bytes[i + 2] = ToByte(Gamma(shaded.X));
-                bytes[i + 3] = 255;
+                pixels[row + x] = PackRgba(
+                    ToByte(Gamma(shaded.X)),
+                    ToByte(Gamma(shaded.Y)),
+                    ToByte(Gamma(shaded.Z)),
+                    255);
             }
         }
     }
@@ -579,6 +557,9 @@ public static class ShadowRasterRenderer
         Math.Clamp(color.Z, 0.0, 8.0));
 
     private static double Gamma(double value) => Math.Pow(Math.Clamp(value, 0.0, 1.0), 1.0 / 2.2);
+    private static uint PackRgba(byte r, byte g, byte b, byte a) =>
+        (uint)r | ((uint)g << 8) | ((uint)b << 16) | ((uint)a << 24);
+
     private static byte ToByte(double value) => (byte)Math.Clamp((int)Math.Round(value * 255.0), 0, 255);
 
     internal readonly record struct RasterVertex(double X, double Y, double Z);
