@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Keep generated files out of source project folders and isolate projects. -->
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory).obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildThisFileDirectory).obj/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

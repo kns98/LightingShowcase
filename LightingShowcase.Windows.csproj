@@ -1,0 +1,125 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>LightingShowcase</AssemblyName>
+    <RootNamespace>LightingShowcase</RootNamespace>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!--
+    Visual Studio can mistake the partial LightingShowcaseForm.*.cs files for
+    independent WinForms designer roots because each file contains the same
+    partial form class. If VS creates .resx sidecar files for those partials,
+    MSBuild may assign them the same manifest resource name and fail with:
+
+      Two output file names resolved to the same output path:
+      obj\Debug\net8.0-windows\LightingShowcase.LightingShowcaseForm.resources
+
+    Keep the real form shell as the form designer root, force subsystem partials
+    to be plain code files, and ignore any accidental partial-sidecar .resx
+    files that VS may have generated locally.
+  -->
+  <ItemGroup>
+    <Compile Update="LightingShowcaseForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="LightingShowcaseForm.CameraUi.cs;LightingShowcaseForm.Input.cs;LightingShowcaseForm.Layout.cs;LightingShowcaseForm.LoopAndCamera.cs;LightingShowcaseForm.Rendering.cs;LightingShowcaseForm.SceneFiles.cs;LightingShowcaseForm.Selection.cs;LightingShowcaseForm.Status.cs;LightingShowcaseForm.TimelineUi.cs;LightingShowcaseForm.LightingUi.cs">
+      <SubType>Code</SubType>
+    </Compile>
+    <EmbeddedResource Remove="LightingShowcaseForm.*.resx" />
+    <None Include="LightingShowcaseForm.*.resx" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HelixToolkit.Wpf" Version="2.27.1" />
+    <PackageReference Include="Veldrid" Version="4.9.0" />
+    <PackageReference Include="Veldrid.SPIRV" Version="1.0.15" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <ProjectReference Include="LightingShowcase.Core/LightingShowcase.Core.csproj" />
+
+    <!-- Keep the renderer CLI in the normal desktop build graph. This makes
+         Build Solution, Rebuild Solution, and direct builds of
+         LightingShowcase.Windows.csproj build the Windows command line project too, while
+         avoiding a compile-time assembly reference from the WinForms app. -->
+    <ProjectReference Include="LightingShowcase.CommandLine/LightingShowcase.CommandLine.Windows.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
+
+    <!-- Build plugin DLLs before the app starts, but do not reference their
+         assemblies at compile time. SceneFormatRegistry loads them dynamically. -->
+    <ProjectReference Include="LightingShowcase.ImportExport.Obj/LightingShowcase.ImportExport.Obj.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Stl/LightingShowcase.ImportExport.Stl.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Ply/LightingShowcase.ImportExport.Ply.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ImportExport.ThreeDs/LightingShowcase.ImportExport.ThreeDs.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Gltf/LightingShowcase.ImportExport.Gltf.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ImportExport.PropXml/LightingShowcase.ImportExport.PropXml.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Fbx/LightingShowcase.ImportExport.Fbx.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ObjectLibrary.BuiltIns/LightingShowcase.ObjectLibrary.BuiltIns.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="LightingShowcase.ObjectLibrary.ReadyMade/LightingShowcase.ObjectLibrary.ReadyMade.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Import/export plugins are separate DLL projects. Do not compile their
+         source files into the WinForms application project. -->
+
+    <!-- These shared model/format-contract files now build in LightingShowcase.Core. -->
+    <Compile Remove="Math\**\*.cs" />
+    <Compile Remove="Lighting\**\*.cs" />
+    <Compile Remove="Scene\**\*.cs" />
+    <Compile Remove="Camera\CameraBasis.cs" />
+    <Compile Remove="Camera\CameraDefinition.cs" />
+    <Compile Remove="Rendering\Ray.cs" />
+    <Compile Remove="Rendering\RenderImage.cs" />
+    <Compile Remove="Rendering\RenderImage.Windows.cs" />
+    <Compile Remove="Rendering\PngWriter.cs" />
+    <Compile Remove="Rendering\VeldridVulkanDevicePreflight.cs" />
+    <Compile Remove="Rendering\VulkanSceneComputeRenderer.cs" />
+    <Compile Remove="LightingShowcase.CommandLine\**\*.cs" />
+    <Compile Remove="LightingShowcase.ImportExport.*\**\*.cs" />
+    <Compile Remove="LightingShowcase.ObjectLibrary.*\**\*.cs" />
+    <Compile Remove="LightingShowcase.Core\**\*.cs" />
+    <Compile Remove="**\bin\**\*.cs;**\obj\**\*.cs" />
+
+    <!-- Windows-only adapters deliberately live in the desktop project. -->
+    <Compile Include="Scene/TextureMap.Windows.cs" />
+    <Compile Include="Rendering/RenderImage.Windows.cs" />
+
+    <EmbeddedResource Remove="LightingShowcase.ImportExport.*\**\*" />
+    <EmbeddedResource Remove="LightingShowcase.ObjectLibrary.*\**\*" />
+    <EmbeddedResource Remove="LightingShowcase.Core\**\*" />
+    <EmbeddedResource Remove="LightingShowcase.CommandLine\**\*" />
+    <EmbeddedResource Remove="**\bin\**\*;**\obj\**\*" />
+
+    <None Remove="LightingShowcase.ImportExport.*\**\*" />
+    <None Remove="LightingShowcase.ObjectLibrary.*\**\*" />
+    <None Remove="LightingShowcase.Core\**\*" />
+    <None Remove="LightingShowcase.CommandLine\**\*" />
+    <None Remove="**\bin\**\*;**\obj\**\*" />
+
+    <Content Remove="LightingShowcase.ImportExport.*\**\*" />
+    <Content Remove="LightingShowcase.ObjectLibrary.*\**\*" />
+    <Content Remove="LightingShowcase.Core\**\*" />
+    <Content Remove="LightingShowcase.CommandLine\**\*" />
+    <Content Remove="**\bin\**\*;**\obj\**\*" />
+  </ItemGroup>
+
+  <Target Name="CopyRuntimePlugins" AfterTargets="Build">
+    <ItemGroup>
+      <RuntimePluginDll Include="LightingShowcase.ImportExport.*/bin/$(Configuration)/net8.0/LightingShowcase.ImportExport.*.dll" />
+      <RuntimePluginDll Include="LightingShowcase.ObjectLibrary.*/bin/$(Configuration)/net8.0/LightingShowcase.ObjectLibrary.*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RuntimePluginDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+  <ItemGroup>
+    <None Include="Shaders/vulkan_scene_primary.comp" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

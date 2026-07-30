@@ -1,0 +1,20 @@
+name: Legacy Windows and Linux workflow (disabled)
+
+# This file intentionally replaces the old self-contained release workflow.
+# Keep the filename so uploading this source tree through GitHub's web UI
+# overwrites the existing workflow instead of leaving it active.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disabled:
+    name: Legacy workflow disabled
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use the consolidated release workflow
+        run: |
+          echo "This legacy workflow is disabled."
+          echo "Use .github/workflows/dotnet-desktop.yml for framework-dependent releases."

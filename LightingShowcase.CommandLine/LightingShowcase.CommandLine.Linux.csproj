@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <AssemblyName>LightingShowcase.CommandLine</AssemblyName>
+    <RootNamespace>LightingShowcase.CommandLine</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../LightingShowcase.Core/LightingShowcase.Core.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.Obj/LightingShowcase.ImportExport.Obj.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.Stl/LightingShowcase.ImportExport.Stl.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.Ply/LightingShowcase.ImportExport.Ply.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.ThreeDs/LightingShowcase.ImportExport.ThreeDs.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.Gltf/LightingShowcase.ImportExport.Gltf.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.PropXml/LightingShowcase.ImportExport.PropXml.csproj" />
+    <ProjectReference Include="../LightingShowcase.ImportExport.Fbx/LightingShowcase.ImportExport.Fbx.csproj" />
+    <ProjectReference Include="../LightingShowcase.ObjectLibrary.BuiltIns/LightingShowcase.ObjectLibrary.BuiltIns.csproj" />
+    <ProjectReference Include="../LightingShowcase.ObjectLibrary.ReadyMade/LightingShowcase.ObjectLibrary.ReadyMade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../Shaders/vulkan_scene_primary.comp"
+          Link="Shaders/vulkan_scene_primary.comp"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

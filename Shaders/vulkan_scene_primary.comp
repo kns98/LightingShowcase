@@ -1,0 +1,639 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer OutputBuffer
+{
+    uint pixels[];
+};
+
+struct GpuTriangle
+{
+    vec4 a;
+    vec4 b;
+    vec4 c;
+    vec4 baseColor;
+    vec4 emission;       // rgb=emission factor color, a=emission strength
+    vec4 materialParams; // x=alpha factor, y=metallic, z=roughness, w=transmission
+    vec4 uvA;
+    vec4 uvB;
+    vec4 uvC;
+    vec4 textureInfo;  // x=base texture index, y=has base, z=emissive texture index, w=has emissive
+    vec4 textureInfo2; // x=metallic/roughness texture index, y=has MR, z=normal texture index, w=has normal
+};
+
+layout(set = 0, binding = 1) readonly buffer TriangleBuffer
+{
+    GpuTriangle triangles[];
+};
+
+struct GpuBvhNode
+{
+    vec4 boundsMin;
+    vec4 boundsMax;
+    vec4 data; // x=left child or first triangle, y=triangle count (0 internal), z=right child, w=reserved
+};
+
+layout(set = 0, binding = 2) readonly buffer BvhBuffer
+{
+    GpuBvhNode bvhNodes[];
+};
+
+struct GpuLight
+{
+    vec4 positionKind;   // xyz=position, w=0 point / 1 directional / 2 spot
+    vec4 directionRange; // xyz=direction light travels, w=range
+    vec4 colorIntensity; // rgb=color, w=intensity
+    vec4 coneShadow;     // x=cos inner, y=cos outer, z=castsShadow, w=enabled
+};
+
+layout(set = 0, binding = 3) readonly buffer LightBuffer
+{
+    GpuLight lights[];
+};
+
+layout(set = 0, binding = 4) uniform CameraConstants
+{
+    vec4 cameraPosition;
+    vec4 cameraForward;
+    vec4 cameraRight;
+    vec4 cameraUp;
+    uvec4 viewportAndCounts; // x=width, y=height, z=triangle count, w=light count
+    uvec4 renderParams;      // x=bounce count, y=sample index, z=tile Y offset, w=tile row count
+    uvec4 bvhParams;         // x=BVH node count, y=sample batch count, zw=reserved
+    vec4 backgroundTopFov;   // xyz=top background, w=tan(vertical fov / 2)
+    vec4 backgroundBottomExposure; // xyz=bottom background, w=exposure
+    vec4 lightingOptions;    // x=ambient multiplier, y=shadows enabled, zw=reserved
+} constants;
+
+layout(set = 0, binding = 5) readonly buffer TexturePixelBuffer
+{
+    uint texturePixels[];
+};
+
+struct GpuTextureInfo
+{
+    vec4 data; // x=pixel offset, y=width, z=height, w=reserved
+};
+
+layout(set = 0, binding = 6) readonly buffer TextureInfoBuffer
+{
+    GpuTextureInfo textureInfos[];
+};
+
+struct Hit
+{
+    bool hit;
+    float t;
+    uint index;
+    vec3 point;
+    vec3 normal;
+    vec3 baseColor;
+    vec3 emission;
+    float alpha;
+    float metallic;
+    float roughness;
+    float transmission;
+    vec2 uv;
+};
+
+uint rngState;
+
+uint wangHash(uint s)
+{
+    s = (s ^ 61u) ^ (s >> 16u);
+    s *= 9u;
+    s = s ^ (s >> 4u);
+    s *= 0x27d4eb2du;
+    s = s ^ (s >> 15u);
+    return s;
+}
+
+float rand01()
+{
+    rngState = wangHash(rngState);
+    return float(rngState & 0x00ffffffu) / 16777216.0;
+}
+
+bool intersectTriangle(vec3 ro, vec3 rd, vec3 v0, vec3 v1, vec3 v2, out float t, out vec3 n, out vec2 baryUv)
+{
+    const float eps = 0.000001;
+    vec3 e1 = v1 - v0;
+    vec3 e2 = v2 - v0;
+    vec3 p = cross(rd, e2);
+    float det = dot(e1, p);
+    if (abs(det) < eps) return false;
+
+    float invDet = 1.0 / det;
+    vec3 s = ro - v0;
+    float u = dot(s, p) * invDet;
+    if (u < 0.0 || u > 1.0) return false;
+
+    vec3 q = cross(s, e1);
+    float v = dot(rd, q) * invDet;
+    if (v < 0.0 || u + v > 1.0) return false;
+
+    t = dot(e2, q) * invDet;
+    if (t <= eps) return false;
+
+    n = normalize(cross(e1, e2));
+    if (dot(n, rd) > 0.0) n = -n;
+    baryUv = vec2(u, v);
+    return true;
+}
+
+float wrap01PreserveEdge(float value)
+{
+    if (isnan(value) || isinf(value)) return 0.0;
+    if (value >= 0.0 && value <= 1.0) return value;
+    value = fract(value);
+    return value < 0.0 ? value + 1.0 : value;
+}
+
+vec4 unpackTexturePixel(uint packed)
+{
+    float r = float(packed & 0xFFu) / 255.0;
+    float g = float((packed >> 8) & 0xFFu) / 255.0;
+    float b = float((packed >> 16) & 0xFFu) / 255.0;
+    float a = float((packed >> 24) & 0xFFu) / 255.0;
+    return vec4(r, g, b, a);
+}
+
+vec4 sampleBaseTexture(uint textureIndex, vec2 uv)
+{
+    GpuTextureInfo info = textureInfos[textureIndex];
+    uint offset = uint(max(info.data.x, 0.0) + 0.5);
+    uint texWidth = max(uint(info.data.y + 0.5), 1u);
+    uint texHeight = max(uint(info.data.z + 0.5), 1u);
+
+    float u = wrap01PreserveEdge(uv.x);
+    float v = wrap01PreserveEdge(uv.y);
+    float fx = texWidth == 1u ? 0.0 : u * float(texWidth - 1u);
+    float fy = texHeight == 1u ? 0.0 : v * float(texHeight - 1u);
+    uint x0 = uint(floor(fx));
+    uint y0 = uint(floor(fy));
+    uint x1 = min(texWidth - 1u, x0 + 1u);
+    uint y1 = min(texHeight - 1u, y0 + 1u);
+    float tx = fx - floor(fx);
+    float ty = fy - floor(fy);
+
+    vec4 c00 = unpackTexturePixel(texturePixels[offset + y0 * texWidth + x0]);
+    vec4 c10 = unpackTexturePixel(texturePixels[offset + y0 * texWidth + x1]);
+    vec4 c01 = unpackTexturePixel(texturePixels[offset + y1 * texWidth + x0]);
+    vec4 c11 = unpackTexturePixel(texturePixels[offset + y1 * texWidth + x1]);
+    vec4 top = mix(c00, c10, tx);
+    vec4 bottom = mix(c01, c11, tx);
+    return mix(top, bottom, ty);
+}
+
+vec4 triangleBaseColorAt(GpuTriangle tri, vec2 uv)
+{
+    vec4 color = tri.baseColor;
+    if (tri.textureInfo.y > 0.5)
+    {
+        uint textureIndex = uint(max(tri.textureInfo.x, 0.0) + 0.5);
+        color *= sampleBaseTexture(textureIndex, uv);
+    }
+    return clamp(color, vec4(0.0), vec4(64.0));
+}
+
+vec3 triangleEmissionAt(GpuTriangle tri, vec2 uv)
+{
+    float strength = max(tri.emission.a, 0.0);
+    if (strength <= 0.0) return vec3(0.0);
+
+    // Match Material.SampleEmission(): if an emissive texture exists, it is the
+    // source mask/color; otherwise the already-textured base color emits.
+    vec3 source = triangleBaseColorAt(tri, uv).rgb;
+    if (tri.textureInfo.w > 0.5)
+    {
+        uint textureIndex = uint(max(tri.textureInfo.z, 0.0) + 0.5);
+        source = sampleBaseTexture(textureIndex, uv).rgb;
+    }
+    return clamp(source * tri.emission.rgb * strength, vec3(0.0), vec3(64.0));
+}
+
+vec2 triangleMetallicRoughnessAt(GpuTriangle tri, vec2 uv)
+{
+    float metallic = clamp(tri.materialParams.y, 0.0, 1.0);
+    float roughness = clamp(tri.materialParams.z, 0.02, 1.0);
+    if (tri.textureInfo2.y > 0.5)
+    {
+        uint textureIndex = uint(max(tri.textureInfo2.x, 0.0) + 0.5);
+        vec3 mr = sampleBaseTexture(textureIndex, uv).rgb;
+        // glTF metallicRoughness stores roughness in G and metallic in B.
+        roughness *= mr.g;
+        metallic *= mr.b;
+    }
+    return vec2(clamp(metallic, 0.0, 1.0), clamp(roughness, 0.02, 1.0));
+}
+
+vec3 applyNormalMapApproximation(GpuTriangle tri, vec2 uv, vec3 faceNormal)
+{
+    vec3 n = normalize(faceNormal);
+    if (tri.textureInfo2.w <= 0.5)
+        return n;
+
+    uint textureIndex = uint(max(tri.textureInfo2.z, 0.0) + 0.5);
+    vec3 sampleN = sampleBaseTexture(textureIndex, uv).rgb;
+
+    // Match the CPU renderer's lightweight normal-map approximation.  The scene
+    // triangle format does not store tangents, so build a stable local basis from
+    // the face normal and blend the map rather than fully replacing the normal.
+    vec3 tangent = abs(n.y) < 0.9
+        ? normalize(cross(vec3(0.0, 1.0, 0.0), n))
+        : normalize(cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 bitangent = normalize(cross(n, tangent));
+    vec3 mapped = normalize(
+        tangent * (sampleN.r * 2.0 - 1.0) +
+        bitangent * (sampleN.g * 2.0 - 1.0) +
+        n * max(0.0, sampleN.b * 2.0 - 1.0));
+    return normalize(mix(n, mapped, 0.45));
+}
+
+bool intersectAabb(vec3 ro, vec3 invRd, vec3 bmin, vec3 bmax, float maxT)
+{
+    vec3 t0 = (bmin - ro) * invRd;
+    vec3 t1 = (bmax - ro) * invRd;
+    vec3 tsmaller = min(t0, t1);
+    vec3 tbigger = max(t0, t1);
+    float tmin = max(max(tsmaller.x, tsmaller.y), max(tsmaller.z, 0.0));
+    float tmax = min(min(tbigger.x, tbigger.y), min(tbigger.z, maxT));
+
+    // Match the CPU BVH's conservative behavior.  Without a small tolerance,
+    // very thin triangle boxes can be rejected by the float slab test even
+    // though the ray/triangle test would have hit them.
+    return tmax + 0.00001 >= tmin;
+}
+
+Hit traceClosest(vec3 ro, vec3 rd, float maxT, uint ignoreIndex)
+{
+    Hit h;
+    h.hit = false;
+    h.t = maxT;
+    h.index = 0u;
+    h.point = vec3(0.0);
+    h.normal = vec3(0.0, 1.0, 0.0);
+    h.baseColor = vec3(0.0);
+    h.emission = vec3(0.0);
+    h.alpha = 1.0;
+    h.metallic = 0.0;
+    h.roughness = 0.8;
+    h.transmission = 0.0;
+    h.uv = vec2(0.0);
+
+    uint nodeCount = constants.bvhParams.x;
+    if (nodeCount == 0u)
+        return h;
+
+    vec3 invRd = 1.0 / vec3(
+        abs(rd.x) < 0.000001 ? (rd.x < 0.0 ? -0.000001 : 0.000001) : rd.x,
+        abs(rd.y) < 0.000001 ? (rd.y < 0.0 ? -0.000001 : 0.000001) : rd.y,
+        abs(rd.z) < 0.000001 ? (rd.z < 0.0 ? -0.000001 : 0.000001) : rd.z);
+
+    uint stack[64];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0u;
+
+    while (stackPtr > 0)
+    {
+        uint nodeIndex = stack[--stackPtr];
+        if (nodeIndex >= nodeCount) continue;
+
+        GpuBvhNode node = bvhNodes[nodeIndex];
+        if (!intersectAabb(ro, invRd, node.boundsMin.xyz, node.boundsMax.xyz, h.t))
+            continue;
+
+        uint firstOrLeft = uint(node.data.x + 0.5);
+        uint triCount = uint(node.data.y + 0.5);
+        uint rightChild = uint(node.data.z + 0.5);
+
+        if (triCount > 0u)
+        {
+            for (uint j = 0u; j < triCount; j++)
+            {
+                uint i = firstOrLeft + j;
+                if (i == ignoreIndex || i >= constants.viewportAndCounts.z) continue;
+                float t;
+                vec3 n;
+                vec2 bary;
+                GpuTriangle tri = triangles[i];
+                if (intersectTriangle(ro, rd, tri.a.xyz, tri.b.xyz, tri.c.xyz, t, n, bary) && t < h.t)
+                {
+                    float w = 1.0 - bary.x - bary.y;
+                    vec2 hitUv = tri.uvA.xy * w + tri.uvB.xy * bary.x + tri.uvC.xy * bary.y;
+                    vec4 sampledBase = triangleBaseColorAt(tri, hitUv);
+                    vec2 mr = triangleMetallicRoughnessAt(tri, hitUv);
+
+                    h.hit = true;
+                    h.t = t;
+                    h.index = i;
+                    h.point = ro + rd * t;
+                    h.normal = applyNormalMapApproximation(tri, hitUv, n);
+                    h.baseColor = sampledBase.rgb;
+                    h.emission = triangleEmissionAt(tri, hitUv);
+                    h.alpha = clamp(tri.materialParams.x * sampledBase.a, 0.0, 1.0);
+                    h.metallic = mr.x;
+                    h.roughness = mr.y;
+                    h.transmission = clamp(tri.materialParams.w, 0.0, 1.0);
+                    h.uv = hitUv;
+                }
+            }
+        }
+        else
+        {
+            // Push both children. Near/far ordering is intentionally omitted for
+            // simplicity; the current closest hit still prunes later AABB tests.
+            if (stackPtr < 63 && rightChild < nodeCount) stack[stackPtr++] = rightChild;
+            if (stackPtr < 63 && firstOrLeft < nodeCount) stack[stackPtr++] = firstOrLeft;
+        }
+    }
+
+    return h;
+}
+
+vec3 background(vec3 rd)
+{
+    vec3 skyTop = max(constants.backgroundTopFov.xyz, vec3(0.0));
+    vec3 skyBottom = max(constants.backgroundBottomExposure.xyz, vec3(0.0));
+    return mix(skyBottom, skyTop, clamp(rd.y * 0.5 + 0.5, 0.0, 1.0));
+}
+
+float distanceAttenuation(float distance, float range)
+{
+    float attenuation = 1.0 / (1.0 + 0.11 * distance * distance);
+    if (range <= 0.0) return attenuation;
+    float normalized = clamp(distance / max(range, 0.0001), 0.0, 1.0);
+    float edgeFade = 1.0 - normalized * normalized;
+    return attenuation * edgeFade * edgeFade;
+}
+
+float shadowFactor(vec3 point, vec3 normal, vec3 lightDir, float maxDistance, uint sourceIndex)
+{
+    vec3 ro = point + normal * 0.004;
+    Hit blocker = traceClosest(ro, lightDir, maxDistance, sourceIndex);
+    if (!blocker.hit) return 1.0;
+
+    // Cheap translucent shadow approximation. Transparent/transmission surfaces
+    // darken less than opaque objects.
+    float opacity = clamp(blocker.alpha * (1.0 - blocker.transmission * 0.65), 0.0, 1.0);
+    return clamp(1.0 - opacity * 0.82, 0.18, 1.0);
+}
+
+vec3 lightContribution(vec3 surfaceColor, vec3 normal, vec3 viewDir, vec3 lightDir, vec3 lightColor, float strength, float metallic, float roughness)
+{
+    float ndotl = max(dot(normal, lightDir), 0.0);
+    if (ndotl <= 0.0 || strength <= 0.0) return vec3(0.0);
+
+    vec3 diffuse = surfaceColor * lightColor * ((1.0 - metallic) * ndotl * strength);
+
+    vec3 view = normalize(-viewDir);
+    vec3 halfVector = normalize(lightDir + view);
+    float ndoth = max(dot(normal, halfVector), 0.0);
+    float shininess = clamp(2.0 / max(roughness * roughness, 0.0001) - 2.0, 2.0, 256.0);
+    float specularTerm = pow(ndoth, shininess) * ndotl * strength;
+    vec3 f0 = mix(vec3(0.04), surfaceColor, metallic);
+    float roughnessDamping = 1.0 - roughness * 0.72;
+    vec3 specular = f0 * lightColor * (specularTerm * roughnessDamping * (1.0 + metallic * 1.8));
+
+    return diffuse + specular;
+}
+
+float spotConeFactor(GpuLight light, vec3 lightToSurface)
+{
+    vec3 direction = normalize(light.directionRange.xyz);
+    float theta = dot(direction, normalize(lightToSurface));
+    float inner = light.coneShadow.x;
+    float outer = light.coneShadow.y;
+    if (theta <= outer) return 0.0;
+    if (theta >= inner) return 1.0;
+    return clamp((theta - outer) / max(inner - outer, 0.0001), 0.0, 1.0);
+}
+
+vec3 directLighting(Hit h, vec3 viewDir)
+{
+    float ambientMultiplier = max(constants.lightingOptions.x, 0.0);
+    vec3 color = h.baseColor * (0.035 + 0.025 * (1.0 - h.metallic)) * ambientMultiplier;
+    uint lightCount = constants.viewportAndCounts.w;
+
+    for (uint i = 0u; i < lightCount; i++)
+    {
+        GpuLight light = lights[i];
+        if (light.coneShadow.w < 0.5) continue;
+
+        float kind = light.positionKind.w;
+        vec3 lightDir;
+        float maxDistance;
+        float strength = light.colorIntensity.w;
+        vec3 lightColor = light.colorIntensity.rgb;
+
+        if (kind > 0.5 && kind < 1.5)
+        {
+            lightDir = normalize(-light.directionRange.xyz);
+            maxDistance = 1.0e20;
+        }
+        else
+        {
+            vec3 toLight = light.positionKind.xyz - h.point;
+            maxDistance = length(toLight);
+            if (maxDistance <= 0.0001) continue;
+            if (light.directionRange.w > 0.0 && maxDistance > light.directionRange.w) continue;
+            lightDir = toLight / maxDistance;
+            strength *= distanceAttenuation(maxDistance, light.directionRange.w);
+
+            if (kind >= 1.5)
+            {
+                float cone = spotConeFactor(light, -lightDir);
+                if (cone <= 0.0) continue;
+                strength *= cone;
+            }
+        }
+
+        bool shadowsEnabled = constants.lightingOptions.y > 0.5;
+        float shadow = shadowsEnabled && light.coneShadow.z > 0.5 ? shadowFactor(h.point, h.normal, lightDir, maxDistance, h.index) : 1.0;
+        color += lightContribution(h.baseColor, h.normal, viewDir, lightDir, lightColor, strength * shadow, h.metallic, h.roughness);
+    }
+
+    return color;
+}
+
+vec3 cosineHemisphere(vec3 n)
+{
+    float r1 = rand01();
+    float r2 = rand01();
+    float phi = 6.28318530718 * r1;
+    float radius = sqrt(r2);
+    float x = cos(phi) * radius;
+    float y = sin(phi) * radius;
+    float z = sqrt(max(0.0, 1.0 - r2));
+
+    vec3 tangent = abs(n.y) < 0.9 ? normalize(cross(vec3(0.0, 1.0, 0.0), n)) : normalize(cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 bitangent = normalize(cross(n, tangent));
+    return normalize(tangent * x + bitangent * y + n * z);
+}
+
+vec3 nextBounceDirection(vec3 incoming, Hit h, out vec3 bounceWeight)
+{
+    vec3 normal = h.normal;
+    if (dot(normal, incoming) > 0.0) normal = -normal;
+
+    if (h.transmission > 0.05 && rand01() < h.transmission)
+    {
+        bounceWeight = mix(vec3(1.0), h.baseColor, 0.45) / max(h.transmission, 0.05);
+        return normalize(incoming);
+    }
+
+    float specularProbability = clamp(h.metallic + (1.0 - h.roughness) * 0.18, 0.05, 0.9);
+    if (rand01() < specularProbability)
+    {
+        vec3 reflected = normalize(reflect(incoming, normal));
+        vec3 glossy = cosineHemisphere(reflected);
+        float rough = clamp(h.roughness * h.roughness, 0.0, 1.0);
+        vec3 f0 = mix(vec3(0.04), h.baseColor, h.metallic);
+        bounceWeight = f0 / max(specularProbability, 0.0001);
+        return normalize(mix(reflected, glossy, rough));
+    }
+
+    bounceWeight = h.baseColor * ((1.0 - h.metallic) / max(1.0 - specularProbability, 0.0001));
+    return cosineHemisphere(normal);
+}
+
+vec3 sanitizeColor(vec3 c)
+{
+    if (any(isnan(c)) || any(isinf(c)))
+        return vec3(0.0);
+    return clamp(c, vec3(0.0), vec3(64.0));
+}
+
+vec3 traceDirectTransparent(vec3 ro, vec3 rd)
+{
+    vec3 result = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    uint ignoreIndex = 0xffffffffu;
+
+    // CPU Trace() blends through translucent / transmission surfaces for the
+    // direct renderer.  Without this, thin lamp glass is shaded as one opaque
+    // flat triangle and the Vulkan image visibly facets even when UVs are right.
+    for (uint depth = 0u; depth < 5u; depth++)
+    {
+        Hit h = traceClosest(ro, rd, 1.0e30, ignoreIndex);
+        if (!h.hit)
+        {
+            result += throughput * background(rd);
+            return sanitizeColor(result);
+        }
+
+        vec3 shaded = h.emission + directLighting(h, rd);
+        float visibleOpacity = clamp(h.alpha * (1.0 - h.transmission * 0.72), 0.0, 1.0);
+        if (visibleOpacity >= 0.995 || depth == 4u)
+        {
+            result += throughput * shaded;
+            return sanitizeColor(result);
+        }
+
+        result += throughput * shaded * visibleOpacity;
+        float tintStrength = clamp(h.transmission * 0.55, 0.0, 0.75);
+        throughput *= (1.0 - visibleOpacity) * mix(vec3(1.0), h.baseColor, tintStrength);
+        throughput = sanitizeColor(throughput);
+
+        ro = h.point + rd * 0.004;
+        ignoreIndex = h.index;
+    }
+
+    result += throughput * background(rd);
+    return sanitizeColor(result);
+}
+
+vec3 tracePath(vec3 ro, vec3 rd, uint maxBounces)
+{
+    if (maxBounces == 0u)
+        return traceDirectTransparent(ro, rd);
+
+    vec3 radiance = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    uint ignoreIndex = 0xffffffffu;
+
+    for (uint bounce = 0u; bounce <= maxBounces; bounce++)
+    {
+        Hit h = traceClosest(ro, rd, 1.0e30, ignoreIndex);
+        if (!h.hit)
+        {
+            radiance += throughput * background(rd);
+            break;
+        }
+
+        radiance += throughput * h.emission;
+        radiance += throughput * directLighting(h, rd);
+
+        if (bounce == maxBounces) break;
+
+        vec3 bounceWeight;
+        vec3 newDir = nextBounceDirection(rd, h, bounceWeight);
+        throughput *= sanitizeColor(bounceWeight);
+        throughput = sanitizeColor(throughput);
+
+        float maxChannel = max(max(throughput.r, throughput.g), throughput.b);
+        if (maxChannel < 0.002) break;
+
+        ro = h.point + newDir * 0.004;
+        rd = newDir;
+        ignoreIndex = h.index;
+    }
+
+    return radiance;
+}
+
+uint packColor(vec3 c)
+{
+    c = sanitizeColor(c) * max(constants.backgroundBottomExposure.w, 0.01);
+    c = c / (c + vec3(1.0)); // simple Reinhard tone map
+    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+    uint r = uint(c.r * 255.0 + 0.5);
+    uint g = uint(c.g * 255.0 + 0.5);
+    uint b = uint(c.b * 255.0 + 0.5);
+    uint a = 255u;
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+void main()
+{
+    uint x = gl_GlobalInvocationID.x;
+    uint localY = gl_GlobalInvocationID.y;
+    uint width = constants.viewportAndCounts.x;
+    uint height = constants.viewportAndCounts.y;
+    uint tileY = constants.renderParams.z;
+    uint tileRows = constants.renderParams.w;
+    if (x >= width || localY >= tileRows) return;
+    uint y = tileY + localY;
+    if (y >= height) return;
+
+    uint sampleBase = constants.renderParams.y;
+    uint sampleCount = max(constants.bvhParams.y, 1u);
+    vec2 size = vec2(float(width), float(height));
+    float fovScale = max(constants.backgroundTopFov.w, 0.0001);
+    float aspect = float(width) / max(float(height), 1.0);
+    vec3 color = vec3(0.0);
+
+    for (uint sampleOffset = 0u; sampleOffset < sampleCount; sampleOffset++)
+    {
+        uint currentSample = sampleBase + sampleOffset;
+        rngState = wangHash(x * 1973u + y * 9277u + currentSample * 26699u + 911u);
+
+        float jitterX = currentSample == 0u ? 0.5 : rand01();
+        float jitterY = currentSample == 0u ? 0.5 : rand01();
+        vec2 frag = vec2(float(x) + jitterX, float(y) + jitterY);
+        vec2 uv = frag / size;
+
+        float sx = (1.0 - 2.0 * uv.x) * aspect * fovScale;
+        float sy = (1.0 - 2.0 * uv.y) * fovScale;
+
+        vec3 ro = constants.cameraPosition.xyz;
+        vec3 rd = normalize(constants.cameraForward.xyz + constants.cameraRight.xyz * sx + constants.cameraUp.xyz * sy);
+
+        uint bounces = min(constants.renderParams.x, 8u);
+        color += tracePath(ro, rd, bounces);
+    }
+
+    color /= float(sampleCount);
+    pixels[y * width + x] = packColor(color);
+}

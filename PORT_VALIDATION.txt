@@ -1,0 +1,15 @@
+Platform project split validation
+
+- Windows entry point: LightingShowcase.Windows.sln / LightingShowcase.Windows.csproj.
+- Windows CLI entry point: LightingShowcase.CommandLine.Windows.csproj.
+- Linux entry point: LightingShowcase.Linux.sln / LightingShowcase.CommandLine.Linux.csproj.
+- LightingShowcase.Core targets plain net8.0 only.
+- Windows bitmap adapter sources compile only in LightingShowcase.Windows.csproj.
+- The Linux solution contains only the Linux CLI, shared core, importer projects, and object-library projects.
+- The Linux project graph contains no net8.0-windows target, WinForms/WPF setting, EnableWindowsTargeting property, Windows project reference, or Windows adapter source reference.
+- All project and props XML files parsed successfully.
+- All ProjectReference and solution project paths resolve.
+- Every non-adapter Scene source file is included in LightingShowcase.Core.
+
+Runtime limitation of this validation environment:
+The .NET SDK, Docker runtime, and Vulkan GPU were not available, so restore, compilation, and GPU rendering were not executed here. Run build.sh on Linux and build.ps1 on Windows as the first runtime verification.

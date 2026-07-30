@@ -1,0 +1,269 @@
+name: Build all and release
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-all:
+    name: Build Windows desktop and CLI
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore full solution
+        run: dotnet restore .\LightingShowcase.Windows.sln
+
+      - name: Build full solution
+        run: dotnet build .\LightingShowcase.Windows.sln --configuration Release --no-restore -p:ContinuousIntegrationBuild=true
+
+      - name: Clean Windows publish directories
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .\publish\desktop, .\publish\commandline -ErrorAction SilentlyContinue
+
+      - name: Publish Windows desktop application without bundled .NET runtime
+        run: dotnet publish .\LightingShowcase.Windows.csproj --configuration Release --runtime win-x64 --self-contained false --output .\publish\desktop -p:SelfContained=false -p:UseAppHost=true -p:ContinuousIntegrationBuild=true
+
+      - name: Publish Windows command-line renderer without bundled .NET runtime
+        run: dotnet publish .\LightingShowcase.CommandLine\LightingShowcase.CommandLine.Windows.csproj --configuration Release --runtime win-x64 --self-contained false --output .\publish\commandline -p:SelfContained=false -p:UseAppHost=true -p:ContinuousIntegrationBuild=true
+
+      - name: Verify published executables
+        shell: pwsh
+        run: |
+          $desktopExe = Join-Path $PWD "publish\desktop\LightingShowcase.exe"
+          $cliExe = Join-Path $PWD "publish\commandline\LightingShowcase.CommandLine.exe"
+
+          if (-not (Test-Path $desktopExe)) {
+            throw "Desktop executable was not published: $desktopExe"
+          }
+          if (-not (Test-Path $cliExe)) {
+            throw "Command-line executable was not published: $cliExe"
+          }
+
+          & $cliExe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows command-line renderer failed its --help smoke test."
+          }
+
+          $forbiddenRuntimeFiles = @(
+            "coreclr.dll",
+            "clrjit.dll",
+            "hostfxr.dll",
+            "hostpolicy.dll",
+            "System.Private.CoreLib.dll",
+            "dotnet.exe"
+          )
+
+          $runtimeFiles = Get-ChildItem .\publish\desktop, .\publish\commandline -Recurse -File |
+            Where-Object { $forbiddenRuntimeFiles -contains $_.Name }
+
+          if ($runtimeFiles) {
+            $runtimeFiles | ForEach-Object { Write-Error "Bundled .NET runtime file found: $($_.FullName)" }
+            throw "Release packages must not contain the .NET/CLR runtime."
+          }
+
+          Write-Host "Desktop executable: $desktopExe"
+          Write-Host "CLI executable: $cliExe"
+          Write-Host "Verified: no bundled .NET/CLR runtime files are present."
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LightingShowcase-desktop-win-x64
+          path: publish/desktop/**
+          if-no-files-found: error
+
+      - name: Upload Windows command-line artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LightingShowcase-commandline-win-x64
+          path: publish/commandline/**
+          if-no-files-found: error
+
+  build-commandline:
+    name: Build CLI - ${{ matrix.display_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - display_name: Linux x64
+            runner: ubuntu-latest
+            runtime: linux-x64
+            package: linux-x64
+          - display_name: macOS Intel
+            runner: macos-15-intel
+            runtime: osx-x64
+            package: macos-x64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore command-line renderer
+        run: dotnet restore ./LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj --runtime ${{ matrix.runtime }}
+
+      - name: Clean command-line publish directory
+        shell: bash
+        run: rm -rf ./publish/commandline
+
+      - name: Publish command-line renderer without bundled .NET runtime
+        run: dotnet publish ./LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained false --output ./publish/commandline --no-restore -p:SelfContained=false -p:UseAppHost=true -p:ContinuousIntegrationBuild=true
+
+      - name: Verify command-line publish
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s publish/commandline/LightingShowcase.CommandLine
+          test -x publish/commandline/LightingShowcase.CommandLine
+          test -s publish/commandline/LightingShowcase.CommandLine.dll
+          test -s publish/commandline/Shaders/vulkan_scene_primary.comp
+
+          forbidden_runtime_files=(
+            coreclr.dll clrjit.dll hostfxr.dll hostpolicy.dll System.Private.CoreLib.dll dotnet.exe
+            libcoreclr.so libclrjit.so libhostfxr.so libhostpolicy.so createdump dotnet
+            libcoreclr.dylib libclrjit.dylib libhostfxr.dylib libhostpolicy.dylib
+          )
+
+          for runtime_file in "${forbidden_runtime_files[@]}"; do
+            if find publish/commandline -type f -name "$runtime_file" -print -quit | grep -q .; then
+              echo "Bundled .NET runtime file found: $runtime_file" >&2
+              exit 1
+            fi
+          done
+
+          ./publish/commandline/LightingShowcase.CommandLine --help >/dev/null
+          echo "Verified: no bundled .NET/CLR runtime files are present."
+
+      - name: Create command-line archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -C publish/commandline -czf "dist/LightingShowcase-commandline-${{ matrix.package }}.tar.gz" .
+
+      - name: Upload command-line artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LightingShowcase-commandline-${{ matrix.package }}
+          path: dist/LightingShowcase-commandline-${{ matrix.package }}.tar.gz
+          if-no-files-found: error
+
+  create-release:
+    name: Create cross-platform release
+    if: github.event_name != 'pull_request'
+    needs:
+      - build-all
+      - build-commandline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows desktop artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: LightingShowcase-desktop-win-x64
+          path: release-input/desktop-win-x64
+
+      - name: Download Windows command-line artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: LightingShowcase-commandline-win-x64
+          path: release-input/commandline-win-x64
+
+      - name: Download Linux command-line archive
+        uses: actions/download-artifact@v4
+        with:
+          name: LightingShowcase-commandline-linux-x64
+          path: dist
+
+      - name: Download macOS Intel command-line archive
+        uses: actions/download-artifact@v4
+        with:
+          name: LightingShowcase-commandline-macos-x64
+          path: dist
+
+      - name: Create Windows release ZIP files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          (cd release-input/desktop-win-x64 && zip -qr ../../dist/LightingShowcase-desktop-win-x64.zip .)
+          (cd release-input/commandline-win-x64 && zip -qr ../../dist/LightingShowcase-commandline-win-x64.zip .)
+          ls -lh dist
+
+      - name: Verify release archives exclude the .NET runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          forbidden='(^|/)(coreclr\.dll|clrjit\.dll|hostfxr\.dll|hostpolicy\.dll|System\.Private\.CoreLib\.dll|dotnet\.exe|libcoreclr\.so|libclrjit\.so|libhostfxr\.so|libhostpolicy\.so|createdump|dotnet|libcoreclr\.dylib|libclrjit\.dylib|libhostfxr\.dylib|libhostpolicy\.dylib)$'
+
+          for archive in dist/*.zip; do
+            if unzip -Z1 "$archive" | grep -E "$forbidden"; then
+              echo "Release ZIP contains bundled .NET/CLR runtime files: $archive" >&2
+              exit 1
+            fi
+          done
+
+          for archive in dist/*.tar.gz; do
+            if tar -tzf "$archive" | grep -E "$forbidden"; then
+              echo "Release archive contains bundled .NET/CLR runtime files: $archive" >&2
+              exit 1
+            fi
+          done
+
+          echo "Verified: release archives contain no bundled .NET/CLR runtime."
+
+      - name: Replace latest GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes \
+              --cleanup-tag
+          else
+            echo "No existing latest release to delete."
+          fi
+
+          gh release create latest \
+            dist/LightingShowcase-desktop-win-x64.zip \
+            dist/LightingShowcase-commandline-win-x64.zip \
+            dist/LightingShowcase-commandline-linux-x64.tar.gz \
+            dist/LightingShowcase-commandline-macos-x64.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Latest Cross-Platform Build" \
+            --notes "Automated Release build. Includes the Windows desktop application and command-line renderers for Windows x64, Linux x64, and macOS x64. These framework-dependent packages require the .NET 8 runtime." \
+            --latest

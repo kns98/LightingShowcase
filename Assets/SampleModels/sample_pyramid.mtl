@@ -1,0 +1,6 @@
+# Minimal MTL colors used by ObjSceneLoader.
+newmtl warm_gold
+Kd 0.95 0.68 0.24
+
+newmtl stone_base
+Kd 0.42 0.40 0.36

@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StbImageSharp" Version="2.30.15" />
+    <PackageReference Include="Veldrid" Version="4.9.0" />
+    <PackageReference Include="Veldrid.SPIRV" Version="1.0.15" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../Math/**/*.cs" LinkBase="Math" />
+    <Compile Include="../Lighting/**/*.cs" LinkBase="Lighting" />
+    <Compile Include="../Scene/Aabb.cs" Link="Scene/Aabb.cs" />
+    <Compile Include="../Scene/AssetRegistry.cs" Link="Scene/AssetRegistry.cs" />
+    <Compile Include="../Scene/BinarySceneFile.cs" Link="Scene/BinarySceneFile.cs" />
+    <Compile Include="../Scene/BvhNode.cs" Link="Scene/BvhNode.cs" />
+    <Compile Include="../Scene/Hit.cs" Link="Scene/Hit.cs" />
+    <Compile Include="../Scene/Material.cs" Link="Scene/Material.cs" />
+    <Compile Include="../Scene/MaterialDefinition.cs" Link="Scene/MaterialDefinition.cs" />
+    <Compile Include="../Scene/MaterialPreset.cs" Link="Scene/MaterialPreset.cs" />
+    <Compile Include="../Scene/MeshSimplifier.cs" Link="Scene/MeshSimplifier.cs" />
+    <Compile Include="../Scene/ObjectLibraryPlugin.cs" Link="Scene/ObjectLibraryPlugin.cs" />
+    <Compile Include="../Scene/ObjectLibraryRegistry.cs" Link="Scene/ObjectLibraryRegistry.cs" />
+    <Compile Include="../Scene/PrimitiveGizmoEditMetadata.cs" Link="Scene/PrimitiveGizmoEditMetadata.cs" />
+    <Compile Include="../Scene/ReadyMadeObjectFactory.cs" Link="Scene/ReadyMadeObjectFactory.cs" />
+    <Compile Include="../Scene/ReadyMadeObjectLibrary.cs" Link="Scene/ReadyMadeObjectLibrary.cs" />
+    <Compile Include="../Scene/RenderBackend.cs" Link="Scene/RenderBackend.cs" />
+    <Compile Include="../Scene/RenderMode.cs" Link="Scene/RenderMode.cs" />
+    <Compile Include="../Scene/RenderSettings.cs" Link="Scene/RenderSettings.cs" />
+    <Compile Include="../Scene/Scene.cs" Link="Scene/Scene.cs" />
+    <Compile Include="../Scene/SceneBuilder.cs" Link="Scene/SceneBuilder.cs" />
+    <Compile Include="../Scene/SceneDocument.cs" Link="Scene/SceneDocument.cs" />
+    <Compile Include="../Scene/SceneFormatPlugin.cs" Link="Scene/SceneFormatPlugin.cs" />
+    <Compile Include="../Scene/SceneFormatRegistry.cs" Link="Scene/SceneFormatRegistry.cs" />
+    <Compile Include="../Scene/SceneFormatTypes.cs" Link="Scene/SceneFormatTypes.cs" />
+    <Compile Include="../Scene/SceneImportExportService.cs" Link="Scene/SceneImportExportService.cs" />
+    <Compile Include="../Scene/SceneMaterials.cs" Link="Scene/SceneMaterials.cs" />
+    <Compile Include="../Scene/SceneObjectGroup.cs" Link="Scene/SceneObjectGroup.cs" />
+    <Compile Include="../Scene/ScenePrimitive.cs" Link="Scene/ScenePrimitive.cs" />
+    <Compile Include="../Scene/ScenePrimitiveRegistry.cs" Link="Scene/ScenePrimitiveRegistry.cs" />
+    <Compile Include="../Scene/SceneProjectFile.cs" Link="Scene/SceneProjectFile.cs" />
+    <Compile Include="../Scene/SceneRenderData.cs" Link="Scene/SceneRenderData.cs" />
+    <Compile Include="../Scene/SceneSnapshot.cs" Link="Scene/SceneSnapshot.cs" />
+    <Compile Include="../Scene/SceneStats.cs" Link="Scene/SceneStats.cs" />
+    <Compile Include="../Scene/TextureAsset.cs" Link="Scene/TextureAsset.cs" />
+    <Compile Include="../Scene/TextureMap.cs" Link="Scene/TextureMap.cs" />
+    <Compile Include="../Scene/TransformConverter.cs" Link="Scene/TransformConverter.cs" />
+    <Compile Include="../Scene/Triangle.cs" Link="Scene/Triangle.cs" />
+    <Compile Include="../Camera/CameraBasis.cs" Link="Camera/CameraBasis.cs" />
+    <Compile Include="../Camera/CameraDefinition.cs" Link="Camera/CameraDefinition.cs" />
+    <Compile Include="../Rendering/Ray.cs" Link="Rendering/Ray.cs" />
+    <Compile Include="../Rendering/RayTracer.cs" Link="Rendering/RayTracer.cs" />
+    <Compile Include="../Rendering/RenderImage.cs" Link="Rendering/RenderImage.cs" />
+    <Compile Include="../Rendering/PngWriter.cs" Link="Rendering/PngWriter.cs" />
+    <Compile Include="../Rendering/VeldridVulkanDevicePreflight.cs" Link="Rendering/VeldridVulkanDevicePreflight.cs" />
+    <Compile Include="../Rendering/VulkanSceneComputeRenderer.cs" Link="Rendering/VulkanSceneComputeRenderer.cs" />
+  </ItemGroup>
+</Project>
