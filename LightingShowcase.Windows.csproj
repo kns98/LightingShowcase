@@ -54,17 +54,18 @@
                       ReferenceOutputAssembly="false"
                       PrivateAssets="all" />
 
-    <!-- Build plugin DLLs before the app starts, but do not reference their
-         assemblies at compile time. SceneFormatRegistry loads them dynamically. -->
-    <ProjectReference Include="LightingShowcase.ImportExport.Obj/LightingShowcase.ImportExport.Obj.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ImportExport.Stl/LightingShowcase.ImportExport.Stl.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ImportExport.Ply/LightingShowcase.ImportExport.Ply.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ImportExport.ThreeDs/LightingShowcase.ImportExport.ThreeDs.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ImportExport.Gltf/LightingShowcase.ImportExport.Gltf.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ImportExport.PropXml/LightingShowcase.ImportExport.PropXml.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ImportExport.Fbx/LightingShowcase.ImportExport.Fbx.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ObjectLibrary.BuiltIns/LightingShowcase.ObjectLibrary.BuiltIns.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <ProjectReference Include="LightingShowcase.ObjectLibrary.ReadyMade/LightingShowcase.ObjectLibrary.ReadyMade.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <!-- Keep importer/exporter and object-library assemblies as normal runtime
+         references. This ensures dotnet publish and Visual Studio publish always
+         include every format DLL; SceneFormatRegistry still discovers them dynamically. -->
+    <ProjectReference Include="LightingShowcase.ImportExport.Obj/LightingShowcase.ImportExport.Obj.csproj" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Stl/LightingShowcase.ImportExport.Stl.csproj" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Ply/LightingShowcase.ImportExport.Ply.csproj" />
+    <ProjectReference Include="LightingShowcase.ImportExport.ThreeDs/LightingShowcase.ImportExport.ThreeDs.csproj" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Gltf/LightingShowcase.ImportExport.Gltf.csproj" />
+    <ProjectReference Include="LightingShowcase.ImportExport.PropXml/LightingShowcase.ImportExport.PropXml.csproj" />
+    <ProjectReference Include="LightingShowcase.ImportExport.Fbx/LightingShowcase.ImportExport.Fbx.csproj" />
+    <ProjectReference Include="LightingShowcase.ObjectLibrary.BuiltIns/LightingShowcase.ObjectLibrary.BuiltIns.csproj" />
+    <ProjectReference Include="LightingShowcase.ObjectLibrary.ReadyMade/LightingShowcase.ObjectLibrary.ReadyMade.csproj" />
   </ItemGroup>
 
   <ItemGroup>

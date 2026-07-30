@@ -27,6 +27,23 @@ dotnet publish (Join-Path $PSScriptRoot 'LightingShowcase.CommandLine\LightingSh
     -p:UseAppHost=true `
     --output $commandLine
 
+$requiredDesktopPlugins = @(
+    'LightingShowcase.ImportExport.Obj.dll',
+    'LightingShowcase.ImportExport.Stl.dll',
+    'LightingShowcase.ImportExport.Ply.dll',
+    'LightingShowcase.ImportExport.ThreeDs.dll',
+    'LightingShowcase.ImportExport.Gltf.dll',
+    'LightingShowcase.ImportExport.PropXml.dll',
+    'LightingShowcase.ImportExport.Fbx.dll'
+)
+
+$missingDesktopPlugins = $requiredDesktopPlugins | Where-Object {
+    -not (Test-Path (Join-Path $desktop $_))
+}
+if ($missingDesktopPlugins) {
+    throw "Windows desktop publish is missing file-format plugins: $($missingDesktopPlugins -join ', ')"
+}
+
 $cli = Join-Path $commandLine 'LightingShowcase.CommandLine.exe'
 if (-not (Test-Path $cli)) {
     throw "Windows command-line executable was not published: $cli"

@@ -168,7 +168,7 @@ public sealed partial class LightingShowcaseForm : Form
     private bool gizmoUndoCaptured = false;
 
     /// <summary>Constructs and initializes this component.</summary>
-    public LightingShowcaseForm(string? initialObjPath = null)
+    public LightingShowcaseForm(string? initialScenePath = null)
     {
         sceneDocument = new SceneDocument(scene);
         sceneFiles = new SceneImportExportService(scene);
@@ -206,7 +206,7 @@ public sealed partial class LightingShowcaseForm : Form
         DragEnter += OnDragEnter;
         DragDrop += OnDragDrop;
 
-        if (!string.IsNullOrWhiteSpace(initialObjPath))
-            TryOpenModel(initialObjPath, recordUndo: false);
+        if (!string.IsNullOrWhiteSpace(initialScenePath))
+            TryOpenModel(initialScenePath, recordUndo: false);
     }
 }

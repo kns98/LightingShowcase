@@ -25,8 +25,8 @@ internal static class Program
         }
 
         ApplicationConfiguration.Initialize();
-        string? initialObjPath = args.FirstOrDefault(path =>
-            string.Equals(Path.GetExtension(path), ".obj", StringComparison.OrdinalIgnoreCase));
-        Application.Run(new LightingShowcaseForm(initialObjPath));
+        string? initialScenePath = args.FirstOrDefault(path =>
+            File.Exists(path) && SceneGraph.SceneFormatRegistry.IsImportExtension(Path.GetExtension(path)));
+        Application.Run(new LightingShowcaseForm(initialScenePath));
     }
 }
