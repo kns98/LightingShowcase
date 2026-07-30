@@ -20,7 +20,8 @@ command -v apt-get >/dev/null 2>&1 || {
 log 'Installing Linux build and Vulkan prerequisites.'
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  ca-certificates curl tar gzip libicu-dev libvulkan1 vulkan-tools mesa-vulkan-drivers
+  ca-certificates curl tar gzip libicu-dev libvulkan1 vulkan-tools mesa-vulkan-drivers \
+  libice6 libsm6 libfontconfig1
 
 if [[ ! -x "$DOTNET_DIR/dotnet" ]] || \
    ! "$DOTNET_DIR/dotnet" --list-sdks 2>/dev/null | awk '{print $1}' | grep -Fxq "$SDK_VERSION"; then

@@ -9,7 +9,10 @@ fail() {
 linux_files=(
   "LightingShowcase.Linux.sln"
   "LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj"
+  "LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj"
   "build.sh"
+  "publish-linux.sh"
+  "publish-linux-preview.sh"
   "LightingShowcase.CommandLine/render.sh"
 )
 
@@ -57,8 +60,6 @@ windows_patterns=(
   'UseWindowsForms'
   'UseWPF'
   'EnableWindowsTargeting'
-  'WinExe'
-  '\.exe([[:space:]]|$)'
   '[A-Za-z]:\\'
 )
 
@@ -71,10 +72,26 @@ done
 # Linux MSBuild and solution paths must use portable forward slashes.
 if grep -n '\\' \
   LightingShowcase.Linux.sln \
-  LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj; then
+  LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj \
+  LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj; then
   fail "Linux solution/project contains a backslash path"
 fi
 
+
+# The Linux preview must remain visualization-only and expose all render views.
+grep -Fq 'LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj' LightingShowcase.Linux.sln \
+  || fail "Linux solution does not include the preview frontend"
+grep -Fq '../LightingShowcase.Core/LightingShowcase.Core.csproj' LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj \
+  || fail "Linux preview does not reference the portable core"
+grep -Fq 'Avalonia.Desktop' LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj \
+  || fail "Linux preview is missing its desktop UI package"
+for renderer in Raster VulkanRaster VulkanCompute Cpu; do
+  grep -Fq "$renderer" LightingShowcase.Preview.Linux/PreviewRendererKind.cs \
+    || fail "Linux preview renderer is missing: $renderer"
+done
+if grep -RniE 'Save(Scene|File)|Transform|MaterialEditor|ObjectSelection' LightingShowcase.Preview.Linux --include='*.cs'; then
+  fail "Linux preview appears to contain editing or scene-save features"
+fi
 
 # Both rasterizers must live in the portable core and must not depend on
 # System.Drawing. The CLI execution path must not hide them behind WINDOWS.

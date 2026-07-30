@@ -31,8 +31,10 @@ $windowsFiles = @(
 $linuxFiles = @(
     'LightingShowcase.Linux.sln',
     'LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj',
+    'LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj',
     'build.sh',
     'publish-linux.sh',
+    'publish-linux-preview.sh',
     'LightingShowcase.CommandLine/render.sh'
 )
 
@@ -52,6 +54,21 @@ foreach ($file in $linuxFiles) {
     Assert-DoesNotContain $file 'LightingShowcase.Windows.csproj'
 }
 
+
+Assert-Contains 'LightingShowcase.Linux.sln' 'LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj'
+Assert-Contains 'LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj' '../LightingShowcase.Core/LightingShowcase.Core.csproj'
+Assert-Contains 'LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj' 'Avalonia.Desktop'
+$previewKinds = Get-Content -LiteralPath 'LightingShowcase.Preview.Linux/PreviewRendererKind.cs' -Raw
+foreach ($renderer in @('Raster', 'VulkanRaster', 'VulkanCompute', 'Cpu')) {
+    if (-not $previewKinds.Contains($renderer)) {
+        throw "Platform split validation failed: Linux preview renderer is missing: $renderer"
+    }
+}
+$previewSource = Get-ChildItem -LiteralPath 'LightingShowcase.Preview.Linux' -Filter '*.cs' -File |
+    ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw } | Out-String
+if ($previewSource -match 'Save(Scene|File)|MaterialEditor|ObjectSelection') {
+    throw 'Platform split validation failed: Linux preview appears to contain editing or scene-save features'
+}
 
 foreach ($rendererFile in @('Rendering/ShadowRasterRenderer.cs', 'Rendering/VulkanRasterRenderer.cs')) {
     Assert-Contains 'LightingShowcase.Core/LightingShowcase.Core.csproj' "../$rendererFile"

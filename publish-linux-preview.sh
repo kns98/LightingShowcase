@@ -2,15 +2,15 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-out="${1:-$root/publish/commandline-linux-x64}"
+out="${1:-$root/publish/preview-linux-x64}"
 
 cd "$root"
 rm -rf "$out"
 
-dotnet restore ./LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj \
+dotnet restore ./LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj \
   --runtime linux-x64
 
-dotnet publish ./LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj \
+dotnet publish ./LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj \
   --configuration Release \
   --runtime linux-x64 \
   --self-contained false \
@@ -32,5 +32,5 @@ for runtime_file in "${forbidden_runtime_files[@]}"; do
   fi
 done
 
-"$out/LightingShowcase.CommandLine" --help >/dev/null
-printf 'Linux CLI published to %s\n' "$out"
+"$out/LightingShowcase.Preview" --help >/dev/null
+printf 'Linux preview frontend published to %s\n' "$out"

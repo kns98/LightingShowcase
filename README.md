@@ -1,6 +1,6 @@
 # LightingShowcase
 
-LightingShowcase is a 3D scene editor and local command-line renderer written in C# and .NET 8. The command-line tool can render supported scene and model files with four rendering backends:
+LightingShowcase is a 3D scene editor, local command-line renderer, and read-only Linux visualization frontend written in C# and .NET 8. The command-line tool can render supported scene and model files with four rendering backends:
 
 - **Raster** — software/CPU z-buffer rasterization
 - **Raster Vulkan** — Vulkan graphics-pipeline rasterization
@@ -13,6 +13,7 @@ The CLI reads scenes directly from disk. Textures, buffers, and other referenced
 
 - Windows desktop scene editor
 - Windows, Linux, and macOS command-line builds
+- Read-only Linux preview window with orbit and zoom controls
 - Four command-line renderer selections
 - Local scene and asset loading
 - Configurable image size, camera, quality, lighting, exposure, background, and shadows
@@ -65,6 +66,7 @@ Both rasterizers use the shared cross-platform `RenderImage` RGBA buffer. `Syste
 
 - .NET 8 SDK to build, or .NET 8 Runtime to run a framework-dependent release
 - Vulkan loader and compatible driver for the `raster-vulkan` and `vulkan` renderers
+- X11 or XWayland for the Linux preview window
 
 The included setup script installs the .NET SDK and common Vulkan packages on apt-based Linux distributions:
 
@@ -133,7 +135,47 @@ LIGHTINGSHOWCASE_VERBOSE_ERRORS=1 \
 - .NET 8 SDK to build, or .NET 8 Runtime to run a framework-dependent release
 - A working Vulkan implementation for the `raster-vulkan` and `vulkan` renderers
 
-The Windows desktop editor is not built for Linux or macOS. Those platforms use the command-line project.
+The Windows desktop editor is not built for Linux or macOS. Linux also includes the read-only preview frontend described below.
+
+## Linux preview window
+
+`LightingShowcase.Preview` is a visualization-only Linux frontend. It does not expose object selection, transforms, materials, lighting edits, scene saving, or any other editor operation.
+
+Launch a published build with a scene path:
+
+```bash
+./LightingShowcase.Preview /path/to/scene.gltf
+```
+
+You can also start it without a scene and type a local path into the toolbar:
+
+```bash
+./LightingShowcase.Preview
+```
+
+Controls:
+
+- Drag with the left mouse button to orbit the camera.
+- Use the mouse wheel or `+`/`-` to zoom.
+- Use the arrow keys for stepped rotation.
+- Use **Reset view** to restore the fitted scene camera.
+- Select **Raster**, **Vulkan raster**, **Vulkan**, or **CPU** from the renderer menu.
+
+Interaction policy:
+
+- **Raster** continuously redraws while dragging and uses the reusable software shadow-map cache.
+- **Vulkan raster** and **Vulkan** first measure an actual frame. Continuous drag rendering is enabled only when the measured frame time is at or below the frontend threshold; otherwise the new angle renders when the mouse button is released.
+- **CPU** uses a reduced-resolution one-sample path preview and always renders after the mouse is released. This avoids locking the UI into a queue of slow CPU frames.
+
+The preview keeps assets external. Textures and buffers are resolved from the same directory tree as the selected scene; nothing is bundled into the scene or application package.
+
+On minimal Ubuntu or WSL installations, install the common Avalonia/X11 libraries:
+
+```bash
+sudo apt install libice6 libsm6 libfontconfig1
+```
+
+The existing `libdl.so` Vulkan preflight fix applies to the preview executable too. Create the compatibility link inside the preview publish directory and run the application from that directory.
 
 ## Command-line quick start
 
@@ -282,7 +324,7 @@ The Windows solution references the Windows command-line project:
 LightingShowcase.CommandLine/LightingShowcase.CommandLine.Windows.csproj
 ```
 
-### Linux command line
+### Linux command line and preview
 
 ```bash
 dotnet restore ./LightingShowcase.Linux.sln
@@ -293,6 +335,13 @@ Or use:
 
 ```bash
 ./build.sh
+```
+
+The Linux solution includes both:
+
+```text
+LightingShowcase.CommandLine/LightingShowcase.CommandLine.Linux.csproj
+LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj
 ```
 
 ### macOS command line
@@ -336,6 +385,18 @@ Default output:
 publish/commandline-linux-x64/
 ```
 
+Publish the Linux visualization frontend separately:
+
+```bash
+./publish-linux-preview.sh
+```
+
+Default output:
+
+```text
+publish/preview-linux-x64/
+```
+
 ## CLI output
 
 After a successful render, the command-line application writes a JSON summary to standard output. It includes the selected backend, scene path, asset directory, dimensions, sample and bounce settings, scene statistics, elapsed time, and output image path.
@@ -359,6 +420,7 @@ Example shape:
 
 ```text
 LightingShowcase.CommandLine/          Command-line parsing and render orchestration
+LightingShowcase.Preview.Linux/         Read-only Linux orbit/zoom visualization frontend
 LightingShowcase.Core/                 Cross-platform engine code
 LightingShowcase.ImportExport.*/       Scene and model format plug-ins
 LightingShowcase.ObjectLibrary.*/      Built-in and ready-made objects
