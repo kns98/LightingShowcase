@@ -15,12 +15,6 @@ namespace LightingShowcase.Preview;
 
 internal sealed class PreviewSceneSession : IDisposable
 {
-    private static readonly string[] SupportedExtensions =
-    [
-        ".lscene", ".lsb", ".prop.xml", ".xml", ".glb", ".gltf",
-        ".fbx", ".obj", ".3ds", ".ply", ".stl"
-    ];
-
     private static int pluginsLoaded;
     private readonly SemaphoreSlim renderGate = new(1, 1);
     private Scene? scene;
@@ -190,7 +184,7 @@ internal sealed class PreviewSceneSession : IDisposable
             throw new FileNotFoundException("Scene input was not found.", path);
         if (string.Equals(Path.GetExtension(path), ".zip", StringComparison.OrdinalIgnoreCase))
             throw new NotSupportedException("ZIP scene packages are not supported. Extract the scene first.");
-        if (!SupportedExtensions.Any(extension => path.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
+        if (!PreviewSceneFileTypes.IsSupportedPath(path))
             throw new NotSupportedException($"Unsupported scene/model format: {Path.GetExtension(path)}");
 
         return path;

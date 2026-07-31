@@ -6,6 +6,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Platform.Storage;
 using LightingShowcase.CameraSystem;
 using LightingShowcase.Rendering;
 
@@ -55,12 +56,13 @@ internal sealed class PreviewWindow : Window
 
         pathBox = new TextBox
         {
-            Watermark = "/path/to/scene.gltf",
+            Watermark = "No scene selected",
             Text = FirstSceneArgument(startupArguments) ?? string.Empty,
             MinWidth = 300,
-            HorizontalAlignment = HorizontalAlignment.Stretch
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            IsReadOnly = true
         };
-        loadButton = new Button { Content = "Load", MinWidth = 72 };
+        loadButton = new Button { Content = "Open…", MinWidth = 82 };
         resetButton = new Button { Content = "Reset view", MinWidth = 95, IsEnabled = false };
         rendererBox = new ComboBox
         {
@@ -76,7 +78,7 @@ internal sealed class PreviewWindow : Window
         };
         status = new TextBlock
         {
-            Text = "Enter a scene path or pass one on the command line.",
+            Text = "Open a scene/model file or pass one on the command line.",
             Margin = new Thickness(10, 7),
             TextWrapping = TextWrapping.Wrap
         };
@@ -122,7 +124,7 @@ internal sealed class PreviewWindow : Window
         root.Children.Add(viewport);
         Content = root;
 
-        loadButton.Click += async (_, _) => await LoadSceneAsync();
+        loadButton.Click += async (_, _) => await BrowseAndLoadSceneAsync();
         resetButton.Click += (_, _) =>
         {
             if (session.TriangleCount == 0)
@@ -146,8 +148,9 @@ internal sealed class PreviewWindow : Window
 
         Opened += async (_, _) =>
         {
-            if (!string.IsNullOrWhiteSpace(pathBox.Text))
-                await LoadSceneAsync();
+            string? startupPath = pathBox.Text;
+            if (!string.IsNullOrWhiteSpace(startupPath))
+                await LoadSceneAsync(startupPath);
         };
         Closed += (_, _) =>
         {
@@ -161,12 +164,48 @@ internal sealed class PreviewWindow : Window
     private RendererChoice SelectedRenderer =>
         rendererBox.SelectedItem as RendererChoice ?? rendererChoices[0];
 
-    private async Task LoadSceneAsync()
+    private async Task BrowseAndLoadSceneAsync()
     {
-        string path = pathBox.Text?.Trim() ?? string.Empty;
+        if (!StorageProvider.CanOpen)
+        {
+            status.Text = "The desktop file picker is unavailable. Pass a scene file on the command line instead.";
+            return;
+        }
+
+        IReadOnlyList<IStorageFile> files;
+        try
+        {
+            files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Open scene or model",
+                AllowMultiple = false,
+                FileTypeFilter = PreviewSceneFileTypes.PickerTypes
+            });
+        }
+        catch (Exception ex)
+        {
+            status.Text = $"Could not open the file picker: {ex.Message}";
+            return;
+        }
+
+        if (files.Count == 0)
+            return;
+
+        string? path = files[0].TryGetLocalPath();
         if (string.IsNullOrWhiteSpace(path))
         {
-            status.Text = "Enter a local scene/model file path.";
+            status.Text = "The selected item is not a local file.";
+            return;
+        }
+
+        await LoadSceneAsync(path);
+    }
+
+    private async Task LoadSceneAsync(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            status.Text = "Select a local scene/model file.";
             return;
         }
 
