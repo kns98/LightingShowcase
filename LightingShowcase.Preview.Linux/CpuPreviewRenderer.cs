@@ -59,20 +59,18 @@ internal static class CpuPreviewRenderer
 
     private static uint PackDisplayColor(Vec3 linear)
     {
-        byte red = ToDisplayByte(linear.X);
-        byte green = ToDisplayByte(linear.Y);
-        byte blue = ToDisplayByte(linear.Z);
+        Vec3 display = RayTracer.ToDisplayColor(linear);
+        byte red = ToDisplayByte(display.X);
+        byte green = ToDisplayByte(display.Y);
+        byte blue = ToDisplayByte(display.Z);
         return red | ((uint)green << 8) | ((uint)blue << 16) | 0xff000000u;
     }
 
     private static byte ToDisplayByte(double value)
     {
-        if (!double.IsFinite(value) || value <= 0.0)
+        if (!double.IsFinite(value))
             return 0;
-
-        double mapped = value / (1.0 + value);
-        double gamma = Math.Pow(Math.Clamp(mapped, 0.0, 1.0), 1.0 / 2.2);
-        return (byte)Math.Clamp((int)Math.Round(gamma * 255.0), 0, 255);
+        return (byte)Math.Clamp((int)Math.Round(Math.Clamp(value, 0.0, 1.0) * 255.0), 0, 255);
     }
 
     private static double Jitter01(int x, int y, int sampleIndex, int axis)

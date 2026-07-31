@@ -17,6 +17,7 @@ namespace LightingShowcase.Rendering;
 public sealed class RayTracer
 {
     private const int MaxTransparencyDepth = 4;
+    private const double Pi = Math.PI;
     private readonly Scene scene;
 
     /// <summary>Constructs and initializes this component.</summary>
@@ -55,8 +56,8 @@ public sealed class RayTracer
                 break;
             }
 
-            Vec3 surfaceColor = hit.Material.Sample(hit.TextureU, hit.TextureV);
-            Vec3 emission = hit.Material.SampleEmission(hit.TextureU, hit.TextureV);
+            Vec3 surfaceColor = hit.Material.SampleLinear(hit.TextureU, hit.TextureV);
+            Vec3 emission = hit.Material.SampleEmissionLinear(hit.TextureU, hit.TextureV);
             if (emission.X > 0.0 || emission.Y > 0.0 || emission.Z > 0.0)
                 radiance += throughput.Multiply(emission);
 
@@ -68,7 +69,7 @@ public sealed class RayTracer
             if (bounce == bounceCount)
                 break;
 
-            Vec3 normal = ApplyNormalMapApproximation(hit).Normalize();
+            Vec3 normal = ApplyNormalMap(hit).Normalize();
             if (normal.Dot(currentRay.Direction) > 0.0)
                 normal = normal * -1.0;
 
@@ -108,7 +109,7 @@ public sealed class RayTracer
         Hit? hit = scene.Intersect(ray);
         if (hit == null) return Background(ray);
 
-        Vec3 surfaceColor = hit.Material.Sample(hit.TextureU, hit.TextureV);
+        Vec3 surfaceColor = hit.Material.SampleLinear(hit.TextureU, hit.TextureV);
         double alpha = hit.Material.SampleAlpha(hit.TextureU, hit.TextureV);
         double transmission = hit.Material.Transmission;
         double visibleOpacity = Math.Clamp(alpha * (1.0 - transmission * 0.72), 0.0, 1.0);
@@ -185,7 +186,7 @@ public sealed class RayTracer
 
         return mode switch
         {
-            RenderMode.Unlit => hit.Material.Sample(hit.TextureU, hit.TextureV),
+            RenderMode.Unlit => hit.Material.SampleLinear(hit.TextureU, hit.TextureV),
             RenderMode.NormalDebug => (hit.Normal.Normalize() + new Vec3(1, 1, 1)) * 0.5,
             RenderMode.UvDebug => new Vec3(Frac(hit.TextureU), Frac(hit.TextureV), 0.25),
             RenderMode.MaterialDebug => new Vec3(hit.Material.Metallic, hit.Material.Roughness, hit.Material.Emission > 0.0 ? 1.0 : 0.0),
@@ -218,35 +219,53 @@ public sealed class RayTracer
 
     private Vec3 ShadeHit(Hit hit, Vec3 surfaceColor, Vec3 viewDirection)
     {
-        Vec3 normal = ApplyNormalMapApproximation(hit);
-        (double metallic, double roughness) = hit.Material.SampleMetallicRoughness(hit.TextureU, hit.TextureV);
-        Vec3 color = surfaceColor * (0.035 + 0.025 * (1.0 - metallic));
+        Vec3 normal = ApplyNormalMap(hit);
+        Vec3 view = (-viewDirection).Normalize();
+        if (normal.Dot(view) < 0.0)
+            normal = -normal;
 
+        (double metallic, double roughness) = hit.Material.SampleMetallicRoughness(hit.TextureU, hit.TextureV);
+        Vec3 direct = Vec3.Zero;
         foreach (SceneLight light in scene.Lights)
         {
             if (light.Enabled)
-                color += DirectLight(hit, light, surfaceColor, normal, viewDirection, metallic, roughness);
+                direct += DirectLight(hit, light, surfaceColor, normal, view, metallic, roughness);
         }
 
-        color += hit.Material.SampleEmission(hit.TextureU, hit.TextureV);
-        return color;
+        double occlusion = hit.Material.SampleOcclusion(hit.TextureU, hit.TextureV);
+        Vec3 indirect = EnvironmentLighting(surfaceColor, normal, view, metallic, roughness) * occlusion;
+        Vec3 emission = hit.Material.SampleEmissionLinear(hit.TextureU, hit.TextureV);
+        return direct + indirect + emission;
     }
 
-    private Vec3 ApplyNormalMapApproximation(Hit hit)
+    private static Vec3 ApplyNormalMap(Hit hit)
     {
+        Vec3 normal = hit.Normal.Normalize();
         if (hit.Material.NormalTexture == null)
-            return hit.Normal;
+            return normal;
 
-        // A full tangent-space normal map needs tangents.  Older scene triangles
-        // do not store tangents, so use a safe small perturbation in a generated
-        // local basis.  This preserves lighting texture/detail cues without
-        // destabilizing intersections or requiring a scene format migration.
+        Vec3 tangent = hit.Tangent.Normalize();
+        Vec3 bitangent = hit.Bitangent.Normalize();
+        if (tangent.Length() < 1e-8 || bitangent.Length() < 1e-8)
+        {
+            Vec3 axis = Math.Abs(normal.Z) < 0.999
+                ? new Vec3(0.0, 0.0, 1.0)
+                : new Vec3(0.0, 1.0, 0.0);
+            tangent = axis.Cross(normal).Normalize();
+            bitangent = normal.Cross(tangent).Normalize();
+        }
+
         Vec3 sample = hit.Material.SampleNormalMap(hit.TextureU, hit.TextureV);
-        Vec3 n = hit.Normal.Normalize();
-        Vec3 tangent = Math.Abs(n.Y) < 0.9 ? new Vec3(0, 1, 0).Cross(n).Normalize() : new Vec3(1, 0, 0).Cross(n).Normalize();
-        Vec3 bitangent = n.Cross(tangent).Normalize();
-        Vec3 mapped = (tangent * (sample.X * 2.0 - 1.0) + bitangent * (sample.Y * 2.0 - 1.0) + n * Math.Max(0.0, sample.Z * 2.0 - 1.0)).Normalize();
-        return Vec3.Lerp(n, mapped, 0.45).Normalize();
+        double scale = hit.Material.NormalScale;
+        Vec3 tangentNormal = new(
+            (sample.X * 2.0 - 1.0) * scale,
+            (sample.Y * 2.0 - 1.0) * scale,
+            sample.Z * 2.0 - 1.0);
+        tangentNormal = tangentNormal.Normalize();
+        return (
+            tangent * tangentNormal.X +
+            bitangent * tangentNormal.Y +
+            normal * tangentNormal.Z).Normalize();
     }
 
     /// <summary>Implements the direct light operation for this file's subsystem.</summary>
@@ -300,24 +319,89 @@ public sealed class RayTracer
         return LightContribution(surfaceColor, normal, viewDirection, lightDir, light.Color, light.Intensity * attenuation * cone * shadow, metallic, roughness);
     }
 
-    private static Vec3 LightContribution(Vec3 surfaceColor, Vec3 normal, Vec3 viewDirection, Vec3 lightDir, Vec3 lightColor, double strength, double metallic, double roughness)
+    private static Vec3 LightContribution(Vec3 surfaceColor, Vec3 normal, Vec3 view, Vec3 lightDir, Vec3 lightColor, double strength, double metallic, double roughness)
     {
-        double ndotl = Math.Max(0.0, normal.Dot(lightDir));
-        if (ndotl <= 0.0 || strength <= 0.0)
+        double nDotL = Math.Max(0.0, normal.Dot(lightDir));
+        double nDotV = Math.Max(0.0001, normal.Dot(view));
+        if (nDotL <= 0.0 || strength <= 0.0)
             return Vec3.Zero;
 
-        Vec3 diffuse = surfaceColor.Multiply(lightColor) * ((1.0 - metallic) * ndotl * strength);
-
-        Vec3 view = (viewDirection * -1.0).Normalize();
         Vec3 halfVector = (lightDir + view).Normalize();
-        double ndoth = Math.Max(0.0, normal.Dot(halfVector));
-        double shininess = Math.Clamp(2.0 / (roughness * roughness) - 2.0, 2.0, 256.0);
-        double specularTerm = Math.Pow(ndoth, shininess) * ndotl * strength;
+        double nDotH = Math.Max(0.0, normal.Dot(halfVector));
+        double vDotH = Math.Max(0.0, view.Dot(halfVector));
+        double alphaRoughness = roughness * roughness;
+        double distribution = DistributionGgx(nDotH, alphaRoughness);
+        double visibility = VisibilitySmithGgxCorrelated(nDotV, nDotL, alphaRoughness);
         Vec3 f0 = Vec3.Lerp(new Vec3(0.04, 0.04, 0.04), surfaceColor, metallic);
-        double roughnessDamping = 1.0 - roughness * 0.72;
-        Vec3 specular = f0.Multiply(lightColor) * (specularTerm * roughnessDamping * (1.0 + metallic * 1.8));
+        Vec3 fresnel = FresnelSchlick(vDotH, f0);
+        Vec3 specular = fresnel * (distribution * visibility);
+        Vec3 diffuse = (new Vec3(1.0, 1.0, 1.0) - fresnel).Multiply(surfaceColor) * ((1.0 - metallic) / Pi);
+        Vec3 radiance = lightColor * (strength * 0.18);
+        return (diffuse + specular).Multiply(radiance) * nDotL;
+    }
 
-        return diffuse + specular;
+    private static Vec3 EnvironmentLighting(Vec3 baseColor, Vec3 normal, Vec3 view, double metallic, double roughness)
+    {
+        double nDotV = Math.Max(0.0001, normal.Dot(view));
+        Vec3 f0 = Vec3.Lerp(new Vec3(0.04, 0.04, 0.04), baseColor, metallic);
+        double grazing = Math.Pow(1.0 - nDotV, 5.0);
+        Vec3 maximum = new(
+            Math.Max(1.0 - roughness, f0.X),
+            Math.Max(1.0 - roughness, f0.Y),
+            Math.Max(1.0 - roughness, f0.Z));
+        Vec3 fresnel = f0 + (maximum - f0) * grazing;
+        Vec3 oneMinusFresnel = new Vec3(1.0, 1.0, 1.0) - fresnel;
+        Vec3 diffuse = DiffuseEnvironment(normal).Multiply(baseColor).Multiply(oneMinusFresnel) * (1.0 - metallic);
+        Vec3 reflection = Reflect(-view, normal).Normalize();
+        Vec3 sharpSpecular = StudioEnvironment(reflection);
+        Vec3 broadSpecular = DiffuseEnvironment(normal);
+        Vec3 specular = Vec3.Lerp(sharpSpecular, broadSpecular, roughness * roughness).Multiply(fresnel);
+        return (diffuse + specular) * 0.72;
+    }
+
+    private static double DistributionGgx(double nDotH, double alphaRoughness)
+    {
+        double a2 = alphaRoughness * alphaRoughness;
+        double f = nDotH * nDotH * (a2 - 1.0) + 1.0;
+        return a2 / Math.Max(Pi * f * f, 1e-8);
+    }
+
+    private static double VisibilitySmithGgxCorrelated(double nDotV, double nDotL, double alphaRoughness)
+    {
+        double a2 = alphaRoughness * alphaRoughness;
+        double gv = nDotL * Math.Sqrt(Math.Max(nDotV * nDotV * (1.0 - a2) + a2, 0.0));
+        double gl = nDotV * Math.Sqrt(Math.Max(nDotL * nDotL * (1.0 - a2) + a2, 0.0));
+        return 0.5 / Math.Max(gv + gl, 1e-8);
+    }
+
+    private static Vec3 FresnelSchlick(double vDotH, Vec3 f0)
+    {
+        double factor = Math.Pow(1.0 - Math.Clamp(vDotH, 0.0, 1.0), 5.0);
+        return f0 + (new Vec3(1.0, 1.0, 1.0) - f0) * factor;
+    }
+
+    private static Vec3 StudioEnvironment(Vec3 direction)
+    {
+        direction = direction.Normalize();
+        double skyAmount = SmoothStep(-0.25, 0.65, direction.Y);
+        Vec3 radiance = Vec3.Lerp(new Vec3(0.035, 0.040, 0.050), new Vec3(0.32, 0.39, 0.49), skyAmount);
+        Vec3 keyDirection = new Vec3(-0.55, 0.62, -0.56).Normalize();
+        Vec3 rimDirection = new Vec3(0.78, 0.28, 0.56).Normalize();
+        double key = Math.Pow(Math.Max(direction.Dot(keyDirection), 0.0), 96.0);
+        double rim = Math.Pow(Math.Max(direction.Dot(rimDirection), 0.0), 180.0);
+        return radiance + new Vec3(5.2, 4.8, 4.2) * key + new Vec3(2.0, 2.7, 3.8) * rim;
+    }
+
+    private static Vec3 DiffuseEnvironment(Vec3 normal)
+    {
+        double skyAmount = Math.Clamp(normal.Y * 0.5 + 0.5, 0.0, 1.0);
+        return Vec3.Lerp(new Vec3(0.055, 0.060, 0.070), new Vec3(0.42, 0.47, 0.54), skyAmount);
+    }
+
+    private static double SmoothStep(double edge0, double edge1, double value)
+    {
+        double t = Math.Clamp((value - edge0) / Math.Max(edge1 - edge0, 1e-8), 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
     }
 
     private static double DistanceAttenuation(double distance, double range)
@@ -352,6 +436,56 @@ public sealed class RayTracer
     {
         double t = Math.Clamp(ray.Direction.Y * 0.5 + 0.5, 0.0, 1.0);
         return Vec3.Lerp(new Vec3(0.01, 0.012, 0.016), new Vec3(0.055, 0.06, 0.072), t);
+    }
+
+    /// <summary>Converts linear HDR ray-traced color to display-referred sRGB using Khronos PBR Neutral tone mapping.</summary>
+    public static Vec3 ToDisplayColor(Vec3 linearColor, double exposure = 1.0)
+    {
+        Vec3 color = SanitizeLinear(linearColor * Math.Max(0.0, exposure));
+        color = PbrNeutralToneMap(color);
+        return new Vec3(
+            LinearChannelToSrgb(color.X),
+            LinearChannelToSrgb(color.Y),
+            LinearChannelToSrgb(color.Z));
+    }
+
+    private static Vec3 PbrNeutralToneMap(Vec3 color)
+    {
+        const double startCompression = 0.76;
+        const double desaturation = 0.15;
+        double minimum = Math.Min(color.X, Math.Min(color.Y, color.Z));
+        double offset = minimum < 0.08 ? minimum - 6.25 * minimum * minimum : 0.04;
+        color -= new Vec3(offset, offset, offset);
+
+        double peak = Math.Max(color.X, Math.Max(color.Y, color.Z));
+        if (peak < startCompression)
+            return SanitizeLinear(color);
+
+        double d = 1.0 - startCompression;
+        double newPeak = 1.0 - d * d / (peak + d - startCompression);
+        color *= newPeak / Math.Max(peak, 1e-8);
+        double grayMix = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+        return SanitizeLinear(Vec3.Lerp(color, new Vec3(newPeak, newPeak, newPeak), grayMix));
+    }
+
+    private static Vec3 SanitizeLinear(Vec3 color) => new(
+        SanitizeLinearChannel(color.X),
+        SanitizeLinearChannel(color.Y),
+        SanitizeLinearChannel(color.Z));
+
+    private static double SanitizeLinearChannel(double value)
+    {
+        if (!double.IsFinite(value) || value <= 0.0)
+            return 0.0;
+        return Math.Min(value, 65504.0);
+    }
+
+    private static double LinearChannelToSrgb(double value)
+    {
+        value = Math.Max(value, 0.0);
+        return value <= 0.0031308
+            ? value * 12.92
+            : 1.055 * Math.Pow(value, 1.0 / 2.4) - 0.055;
     }
 
     /// <summary>Implements the ray direction operation for this file's subsystem.</summary>

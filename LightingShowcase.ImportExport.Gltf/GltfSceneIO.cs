@@ -308,7 +308,7 @@ public static class GltfSceneIO
                     if (triangleMaterial.Emission > 0.0 && triangleMaterial.EmissiveTexture != null)
                     {
                         Vec3 centroid = (positions[ia] + positions[ib] + positions[ic]) / 3.0;
-                        Vec3 emissiveSample = (triangleMaterial.SampleEmission(uva.U, uva.V) + triangleMaterial.SampleEmission(uvb.U, uvb.V) + triangleMaterial.SampleEmission(uvc.U, uvc.V)) / 3.0;
+                        Vec3 emissiveSample = (triangleMaterial.SampleEmissionLinear(uva.U, uva.V) + triangleMaterial.SampleEmissionLinear(uvb.U, uvb.V) + triangleMaterial.SampleEmissionLinear(uvc.U, uvc.V)) / 3.0;
                         double luminance = 0.2126 * emissiveSample.X + 0.7152 * emissiveSample.Y + 0.0722 * emissiveSample.Z;
                         if (luminance > 0.02)
                         {

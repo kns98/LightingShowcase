@@ -288,11 +288,7 @@ public sealed class FrameRenderer
     /// <summary>Implements the gamma correct operation for this file's subsystem.</summary>
     private static Vec3 GammaCorrect(Vec3 c)
     {
-        c = SanitizeColor(c);
-        return new(
-            System.Math.Pow(Clamp(c.X), 1.0 / 2.2),
-            System.Math.Pow(Clamp(c.Y), 1.0 / 2.2),
-            System.Math.Pow(Clamp(c.Z), 1.0 / 2.2));
+        return RayTracer.ToDisplayColor(SanitizeColor(c));
     }
 
     /// <summary>Returns a finite, non-negative color. This prevents NaN/Infinity from poisoning progressive accumulation.</summary>

@@ -2,6 +2,8 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+const float PI = 3.14159265358979323846;
+
 layout(set = 0, binding = 0) buffer OutputBuffer
 {
     uint pixels[];
@@ -9,17 +11,17 @@ layout(set = 0, binding = 0) buffer OutputBuffer
 
 struct GpuTriangle
 {
-    vec4 a;
-    vec4 b;
-    vec4 c;
-    vec4 baseColor;
-    vec4 emission;       // rgb=emission factor color, a=emission strength
-    vec4 materialParams; // x=alpha factor, y=metallic, z=roughness, w=transmission
-    vec4 uvA;
-    vec4 uvB;
-    vec4 uvC;
-    vec4 textureInfo;  // x=base texture index, y=has base, z=emissive texture index, w=has emissive
-    vec4 textureInfo2; // x=metallic/roughness texture index, y=has MR, z=normal texture index, w=has normal
+    vec4 a;             // xyz=position A, w=normal A.x
+    vec4 b;             // xyz=position B, w=normal A.y
+    vec4 c;             // xyz=position C, w=normal A.z
+    vec4 baseColor;     // rgb=linear factor, a=alpha factor
+    vec4 emission;      // rgb=linear factor, a=emission strength
+    vec4 materialParams;// x=metallic, y=roughness, z=transmission, w=normal scale
+    vec4 uvA;           // xy=UV A, zw=normal B.xy
+    vec4 uvB;           // xy=UV B, z=normal B.z, w=normal C.x
+    vec4 uvC;           // xy=UV C, zw=normal C.yz
+    vec4 textureInfo;   // x=base index, y=emissive index, z=alpha/double-sided flags, w=alpha cutoff
+    vec4 textureInfo2;  // x=MR index, y=normal index, z=occlusion index, w=occlusion strength
 };
 
 layout(set = 0, binding = 1) readonly buffer TriangleBuffer
@@ -94,6 +96,7 @@ struct Hit
     float metallic;
     float roughness;
     float transmission;
+    float occlusion;
     vec2 uv;
 };
 
@@ -186,69 +189,190 @@ vec4 sampleBaseTexture(uint textureIndex, vec2 uv)
     return mix(top, bottom, ty);
 }
 
+float srgbChannelToLinear(float value)
+{
+    value = clamp(value, 0.0, 1.0);
+    return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+}
+
+vec3 srgbToLinear(vec3 value)
+{
+    return vec3(
+        srgbChannelToLinear(value.r),
+        srgbChannelToLinear(value.g),
+        srgbChannelToLinear(value.b));
+}
+
+float linearChannelToSrgb(float value)
+{
+    value = max(value, 0.0);
+    return value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+vec3 linearToSrgb(vec3 value)
+{
+    return vec3(
+        linearChannelToSrgb(value.r),
+        linearChannelToSrgb(value.g),
+        linearChannelToSrgb(value.b));
+}
+
+vec3 pbrNeutralToneMap(vec3 color)
+{
+    const float startCompression = 0.76;
+    const float desaturation = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression)
+        return max(color, vec3(0.0));
+
+    float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / max(peak, 0.000001);
+    float grayMix = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return max(mix(color, newPeak * vec3(1.0), grayMix), vec3(0.0));
+}
+
+float distributionGgx(float nDotH, float alphaRoughness)
+{
+    float a2 = alphaRoughness * alphaRoughness;
+    float f = nDotH * nDotH * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * f * f, 0.000001);
+}
+
+float visibilitySmithGgxCorrelated(float nDotV, float nDotL, float alphaRoughness)
+{
+    float a2 = alphaRoughness * alphaRoughness;
+    float gv = nDotL * sqrt(max(nDotV * nDotV * (1.0 - a2) + a2, 0.0));
+    float gl = nDotV * sqrt(max(nDotL * nDotL * (1.0 - a2) + a2, 0.0));
+    return 0.5 / max(gv + gl, 0.000001);
+}
+
+vec3 fresnelSchlick(float vDotH, vec3 f0)
+{
+    float factor = pow(1.0 - clamp(vDotH, 0.0, 1.0), 5.0);
+    return f0 + (vec3(1.0) - f0) * factor;
+}
+
+int textureIndex(float encoded)
+{
+    return int(round(encoded));
+}
+
+vec3 triangleNormalA(GpuTriangle tri)
+{
+    return vec3(tri.a.w, tri.b.w, tri.c.w);
+}
+
+vec3 triangleNormalB(GpuTriangle tri)
+{
+    return vec3(tri.uvA.z, tri.uvA.w, tri.uvB.z);
+}
+
+vec3 triangleNormalC(GpuTriangle tri)
+{
+    return vec3(tri.uvB.w, tri.uvC.z, tri.uvC.w);
+}
+
 vec4 triangleBaseColorAt(GpuTriangle tri, vec2 uv)
 {
     vec4 color = tri.baseColor;
-    if (tri.textureInfo.y > 0.5)
+    int index = textureIndex(tri.textureInfo.x);
+    if (index >= 0)
     {
-        uint textureIndex = uint(max(tri.textureInfo.x, 0.0) + 0.5);
-        color *= sampleBaseTexture(textureIndex, uv);
+        vec4 sampled = sampleBaseTexture(uint(index), uv);
+        color.rgb *= srgbToLinear(sampled.rgb);
+        color.a *= sampled.a;
     }
     return clamp(color, vec4(0.0), vec4(64.0));
 }
 
-vec3 triangleEmissionAt(GpuTriangle tri, vec2 uv)
+vec3 triangleEmissionAt(GpuTriangle tri, vec2 uv, vec3 linearBaseColor)
 {
     float strength = max(tri.emission.a, 0.0);
     if (strength <= 0.0) return vec3(0.0);
 
-    // Match Material.SampleEmission(): if an emissive texture exists, it is the
-    // source mask/color; otherwise the already-textured base color emits.
-    vec3 source = triangleBaseColorAt(tri, uv).rgb;
-    if (tri.textureInfo.w > 0.5)
-    {
-        uint textureIndex = uint(max(tri.textureInfo.z, 0.0) + 0.5);
-        source = sampleBaseTexture(textureIndex, uv).rgb;
-    }
+    vec3 source = linearBaseColor;
+    int index = textureIndex(tri.textureInfo.y);
+    if (index >= 0)
+        source = srgbToLinear(sampleBaseTexture(uint(index), uv).rgb);
     return clamp(source * tri.emission.rgb * strength, vec3(0.0), vec3(64.0));
 }
 
 vec2 triangleMetallicRoughnessAt(GpuTriangle tri, vec2 uv)
 {
-    float metallic = clamp(tri.materialParams.y, 0.0, 1.0);
-    float roughness = clamp(tri.materialParams.z, 0.02, 1.0);
-    if (tri.textureInfo2.y > 0.5)
+    float metallic = clamp(tri.materialParams.x, 0.0, 1.0);
+    float roughness = clamp(tri.materialParams.y, 0.045, 1.0);
+    int index = textureIndex(tri.textureInfo2.x);
+    if (index >= 0)
     {
-        uint textureIndex = uint(max(tri.textureInfo2.x, 0.0) + 0.5);
-        vec3 mr = sampleBaseTexture(textureIndex, uv).rgb;
-        // glTF metallicRoughness stores roughness in G and metallic in B.
+        vec3 mr = sampleBaseTexture(uint(index), uv).rgb;
         roughness *= mr.g;
         metallic *= mr.b;
     }
-    return vec2(clamp(metallic, 0.0, 1.0), clamp(roughness, 0.02, 1.0));
+    return vec2(clamp(metallic, 0.0, 1.0), clamp(roughness, 0.045, 1.0));
 }
 
-vec3 applyNormalMapApproximation(GpuTriangle tri, vec2 uv, vec3 faceNormal)
+float triangleOcclusionAt(GpuTriangle tri, vec2 uv)
 {
-    vec3 n = normalize(faceNormal);
-    if (tri.textureInfo2.w <= 0.5)
-        return n;
+    int index = textureIndex(tri.textureInfo2.z);
+    if (index < 0)
+        return 1.0;
 
-    uint textureIndex = uint(max(tri.textureInfo2.z, 0.0) + 0.5);
-    vec3 sampleN = sampleBaseTexture(textureIndex, uv).rgb;
+    float sampled = clamp(sampleBaseTexture(uint(index), uv).r, 0.0, 1.0);
+    return mix(1.0, sampled, clamp(tri.textureInfo2.w, 0.0, 1.0));
+}
 
-    // Match the CPU renderer's lightweight normal-map approximation.  The scene
-    // triangle format does not store tangents, so build a stable local basis from
-    // the face normal and blend the map rather than fully replacing the normal.
-    vec3 tangent = abs(n.y) < 0.9
-        ? normalize(cross(vec3(0.0, 1.0, 0.0), n))
-        : normalize(cross(vec3(1.0, 0.0, 0.0), n));
-    vec3 bitangent = normalize(cross(n, tangent));
-    vec3 mapped = normalize(
-        tangent * (sampleN.r * 2.0 - 1.0) +
-        bitangent * (sampleN.g * 2.0 - 1.0) +
-        n * max(0.0, sampleN.b * 2.0 - 1.0));
-    return normalize(mix(n, mapped, 0.45));
+vec3 interpolatedNormal(GpuTriangle tri, vec2 bary, vec3 geometricNormal)
+{
+    float w = 1.0 - bary.x - bary.y;
+    vec3 normal = normalize(
+        triangleNormalA(tri) * w +
+        triangleNormalB(tri) * bary.x +
+        triangleNormalC(tri) * bary.y);
+    if (dot(normal, geometricNormal) < 0.0)
+        normal = -normal;
+    return normal;
+}
+
+vec3 applyNormalMap(GpuTriangle tri, vec2 uv, vec3 shadingNormal)
+{
+    vec3 normal = normalize(shadingNormal);
+    int index = textureIndex(tri.textureInfo2.y);
+    if (index < 0)
+        return normal;
+
+    vec3 edge1 = tri.b.xyz - tri.a.xyz;
+    vec3 edge2 = tri.c.xyz - tri.a.xyz;
+    vec2 deltaUv1 = tri.uvB.xy - tri.uvA.xy;
+    vec2 deltaUv2 = tri.uvC.xy - tri.uvA.xy;
+    float determinant = deltaUv1.x * deltaUv2.y - deltaUv1.y * deltaUv2.x;
+
+    vec3 tangent;
+    vec3 bitangent;
+    if (abs(determinant) > 0.0000001)
+    {
+        float inverse = 1.0 / determinant;
+        vec3 rawTangent = (edge1 * deltaUv2.y - edge2 * deltaUv1.y) * inverse;
+        vec3 rawBitangent = (edge2 * deltaUv1.x - edge1 * deltaUv2.x) * inverse;
+        tangent = normalize(rawTangent - normal * dot(normal, rawTangent));
+        float handedness = dot(cross(normal, tangent), rawBitangent) < 0.0 ? -1.0 : 1.0;
+        bitangent = normalize(cross(normal, tangent)) * handedness;
+    }
+    else
+    {
+        vec3 axis = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+        tangent = normalize(cross(axis, normal));
+        bitangent = normalize(cross(normal, tangent));
+    }
+
+    vec3 tangentNormal = sampleBaseTexture(uint(index), uv).xyz * 2.0 - 1.0;
+    tangentNormal.xy *= tri.materialParams.w;
+    tangentNormal = normalize(tangentNormal);
+    return normalize(tangent * tangentNormal.x + bitangent * tangentNormal.y + normal * tangentNormal.z);
 }
 
 bool intersectAabb(vec3 ro, vec3 invRd, vec3 bmin, vec3 bmax, float maxT)
@@ -280,6 +404,7 @@ Hit traceClosest(vec3 ro, vec3 rd, float maxT, uint ignoreIndex)
     h.metallic = 0.0;
     h.roughness = 0.8;
     h.transmission = 0.0;
+    h.occlusion = 1.0;
     h.uv = vec2(0.0);
 
     uint nodeCount = constants.bvhParams.x;
@@ -323,19 +448,30 @@ Hit traceClosest(vec3 ro, vec3 rd, float maxT, uint ignoreIndex)
                     float w = 1.0 - bary.x - bary.y;
                     vec2 hitUv = tri.uvA.xy * w + tri.uvB.xy * bary.x + tri.uvC.xy * bary.y;
                     vec4 sampledBase = triangleBaseColorAt(tri, hitUv);
+                    int alphaFlags = int(round(tri.textureInfo.z));
+                    int alphaMode = alphaFlags & 3;
+                    if (alphaMode == 1 && sampledBase.a < tri.textureInfo.w)
+                        continue;
+
                     vec2 mr = triangleMetallicRoughnessAt(tri, hitUv);
+                    vec3 shadingNormal = interpolatedNormal(tri, bary, n);
+                    if (dot(shadingNormal, rd) > 0.0)
+                        shadingNormal = -shadingNormal;
 
                     h.hit = true;
                     h.t = t;
                     h.index = i;
                     h.point = ro + rd * t;
-                    h.normal = applyNormalMapApproximation(tri, hitUv, n);
+                    h.normal = applyNormalMap(tri, hitUv, shadingNormal);
+                    if (dot(h.normal, rd) > 0.0)
+                        h.normal = -h.normal;
                     h.baseColor = sampledBase.rgb;
-                    h.emission = triangleEmissionAt(tri, hitUv);
-                    h.alpha = clamp(tri.materialParams.x * sampledBase.a, 0.0, 1.0);
+                    h.emission = triangleEmissionAt(tri, hitUv, sampledBase.rgb);
+                    h.alpha = alphaMode == 0 ? 1.0 : clamp(sampledBase.a, 0.0, 1.0);
                     h.metallic = mr.x;
                     h.roughness = mr.y;
-                    h.transmission = clamp(tri.materialParams.w, 0.0, 1.0);
+                    h.transmission = clamp(tri.materialParams.z, 0.0, 1.0);
+                    h.occlusion = triangleOcclusionAt(tri, hitUv);
                     h.uv = hitUv;
                 }
             }
@@ -380,23 +516,24 @@ float shadowFactor(vec3 point, vec3 normal, vec3 lightDir, float maxDistance, ui
     return clamp(1.0 - opacity * 0.82, 0.18, 1.0);
 }
 
-vec3 lightContribution(vec3 surfaceColor, vec3 normal, vec3 viewDir, vec3 lightDir, vec3 lightColor, float strength, float metallic, float roughness)
+vec3 lightContribution(vec3 baseColor, vec3 normal, vec3 view, vec3 lightDir, vec3 lightColor, float strength, float metallic, float roughness)
 {
-    float ndotl = max(dot(normal, lightDir), 0.0);
-    if (ndotl <= 0.0 || strength <= 0.0) return vec3(0.0);
+    float nDotL = max(dot(normal, lightDir), 0.0);
+    float nDotV = max(dot(normal, view), 0.0001);
+    if (nDotL <= 0.0 || strength <= 0.0) return vec3(0.0);
 
-    vec3 diffuse = surfaceColor * lightColor * ((1.0 - metallic) * ndotl * strength);
-
-    vec3 view = normalize(-viewDir);
     vec3 halfVector = normalize(lightDir + view);
-    float ndoth = max(dot(normal, halfVector), 0.0);
-    float shininess = clamp(2.0 / max(roughness * roughness, 0.0001) - 2.0, 2.0, 256.0);
-    float specularTerm = pow(ndoth, shininess) * ndotl * strength;
-    vec3 f0 = mix(vec3(0.04), surfaceColor, metallic);
-    float roughnessDamping = 1.0 - roughness * 0.72;
-    vec3 specular = f0 * lightColor * (specularTerm * roughnessDamping * (1.0 + metallic * 1.8));
-
-    return diffuse + specular;
+    float nDotH = max(dot(normal, halfVector), 0.0);
+    float vDotH = max(dot(view, halfVector), 0.0);
+    float alphaRoughness = roughness * roughness;
+    float distribution = distributionGgx(nDotH, alphaRoughness);
+    float visibility = visibilitySmithGgxCorrelated(nDotV, nDotL, alphaRoughness);
+    vec3 f0 = mix(vec3(0.04), baseColor, metallic);
+    vec3 fresnel = fresnelSchlick(vDotH, f0);
+    vec3 specular = distribution * visibility * fresnel;
+    vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * baseColor / PI;
+    vec3 radiance = lightColor * strength * 0.18;
+    return (diffuse + specular) * radiance * nDotL;
 }
 
 float spotConeFactor(GpuLight light, vec3 lightToSurface)
@@ -410,10 +547,41 @@ float spotConeFactor(GpuLight light, vec3 lightToSurface)
     return clamp((theta - outer) / max(inner - outer, 0.0001), 0.0, 1.0);
 }
 
-vec3 directLighting(Hit h, vec3 viewDir)
+vec3 studioEnvironment(vec3 direction)
 {
-    float ambientMultiplier = max(constants.lightingOptions.x, 0.0);
-    vec3 color = h.baseColor * (0.035 + 0.025 * (1.0 - h.metallic)) * ambientMultiplier;
+    direction = normalize(direction);
+    float skyAmount = smoothstep(-0.25, 0.65, direction.y);
+    vec3 radiance = mix(vec3(0.035, 0.040, 0.050), vec3(0.32, 0.39, 0.49), skyAmount);
+    vec3 keyDirection = normalize(vec3(-0.55, 0.62, -0.56));
+    vec3 rimDirection = normalize(vec3(0.78, 0.28, 0.56));
+    radiance += vec3(5.2, 4.8, 4.2) * pow(max(dot(direction, keyDirection), 0.0), 96.0);
+    radiance += vec3(2.0, 2.7, 3.8) * pow(max(dot(direction, rimDirection), 0.0), 180.0);
+    return radiance;
+}
+
+vec3 diffuseEnvironment(vec3 normal)
+{
+    float skyAmount = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(vec3(0.055, 0.060, 0.070), vec3(0.42, 0.47, 0.54), skyAmount);
+}
+
+vec3 environmentLighting(Hit h, vec3 view)
+{
+    float nDotV = max(dot(h.normal, view), 0.0001);
+    vec3 f0 = mix(vec3(0.04), h.baseColor, h.metallic);
+    vec3 fresnel = f0 + (max(vec3(1.0 - h.roughness), f0) - f0) * pow(1.0 - nDotV, 5.0);
+    vec3 diffuse = diffuseEnvironment(h.normal) * h.baseColor * (vec3(1.0) - fresnel) * (1.0 - h.metallic);
+    vec3 reflection = reflect(-view, h.normal);
+    vec3 sharpSpecular = studioEnvironment(reflection);
+    vec3 broadSpecular = diffuseEnvironment(h.normal);
+    vec3 specular = mix(sharpSpecular, broadSpecular, h.roughness * h.roughness) * fresnel;
+    return (diffuse + specular) * h.occlusion * 0.72 * max(constants.lightingOptions.x, 0.0);
+}
+
+vec3 directLighting(Hit h, vec3 incomingDirection)
+{
+    vec3 view = normalize(-incomingDirection);
+    vec3 color = vec3(0.0);
     uint lightCount = constants.viewportAndCounts.w;
 
     for (uint i = 0u; i < lightCount; i++)
@@ -445,13 +613,15 @@ vec3 directLighting(Hit h, vec3 viewDir)
             {
                 float cone = spotConeFactor(light, -lightDir);
                 if (cone <= 0.0) continue;
-                strength *= cone;
+                strength *= cone * cone;
             }
         }
 
         bool shadowsEnabled = constants.lightingOptions.y > 0.5;
-        float shadow = shadowsEnabled && light.coneShadow.z > 0.5 ? shadowFactor(h.point, h.normal, lightDir, maxDistance, h.index) : 1.0;
-        color += lightContribution(h.baseColor, h.normal, viewDir, lightDir, lightColor, strength * shadow, h.metallic, h.roughness);
+        float shadow = shadowsEnabled && light.coneShadow.z > 0.5
+            ? shadowFactor(h.point, h.normal, lightDir, maxDistance, h.index)
+            : 1.0;
+        color += lightContribution(h.baseColor, h.normal, view, lightDir, lightColor, strength * shadow, h.metallic, h.roughness);
     }
 
     return color;
@@ -523,7 +693,7 @@ vec3 traceDirectTransparent(vec3 ro, vec3 rd)
             return sanitizeColor(result);
         }
 
-        vec3 shaded = h.emission + directLighting(h, rd);
+        vec3 shaded = h.emission + directLighting(h, rd) + environmentLighting(h, normalize(-rd));
         float visibleOpacity = clamp(h.alpha * (1.0 - h.transmission * 0.72), 0.0, 1.0);
         if (visibleOpacity >= 0.995 || depth == 4u)
         {
@@ -563,7 +733,7 @@ vec3 tracePath(vec3 ro, vec3 rd, uint maxBounces)
         }
 
         radiance += throughput * h.emission;
-        radiance += throughput * directLighting(h, rd);
+        radiance += throughput * (directLighting(h, rd) + environmentLighting(h, normalize(-rd)));
 
         if (bounce == maxBounces) break;
 
@@ -586,13 +756,12 @@ vec3 tracePath(vec3 ro, vec3 rd, uint maxBounces)
 uint packColor(vec3 c)
 {
     c = sanitizeColor(c) * max(constants.backgroundBottomExposure.w, 0.01);
-    c = c / (c + vec3(1.0)); // simple Reinhard tone map
-    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+    c = linearToSrgb(pbrNeutralToneMap(c));
+    c = clamp(c, 0.0, 1.0);
     uint r = uint(c.r * 255.0 + 0.5);
     uint g = uint(c.g * 255.0 + 0.5);
     uint b = uint(c.b * 255.0 + 0.5);
-    uint a = 255u;
-    return r | (g << 8) | (b << 16) | (a << 24);
+    return r | (g << 8) | (b << 16) | (255u << 24);
 }
 
 void main()

@@ -86,13 +86,22 @@ public sealed class Material
         OcclusionStrength = double.IsFinite(occlusionStrength) ? Math.Clamp(occlusionStrength, 0.0, 1.0) : 1.0;
     }
 
-    /// <summary>Samples the base color/albedo texture.</summary>
+    /// <summary>Samples the base color/albedo texture in its stored color space.</summary>
     public Vec3 Sample(double u, double v)
     {
-        // glTF baseColor is texture * baseColorFactor.  Keep texture-only
-        // materials bright by importing their color factor as white, but still
-        // allow explicit tint factors and vertex colors to affect ray rendering.
+        // Preserve the historical sampling contract for editor/raster callers.
+        // glTF-aware ray paths should use SampleLinear(), because base-color
+        // textures are encoded as sRGB while the factor is already linear.
         return Texture == null ? Color : Texture.Sample(u, v).Multiply(Color);
+    }
+
+    /// <summary>Samples glTF base color in linear-light space for physically based shading.</summary>
+    public Vec3 SampleLinear(double u, double v)
+    {
+        if (Texture == null)
+            return Color;
+
+        return SrgbToLinear(Texture.Sample(u, v)).Multiply(Color);
     }
 
     /// <summary>Samples opacity from baseColorFactor alpha and texture alpha.</summary>
@@ -124,17 +133,49 @@ public sealed class Material
         return NormalTexture.Sample(u, v);
     }
 
-    /// <summary>Samples the self-illumination term used by glTF emissive materials.</summary>
+    /// <summary>Samples the self-illumination term using the historical stored-color-space behavior.</summary>
     public Vec3 SampleEmission(double u, double v)
     {
         if (Emission <= 0.0)
             return Vec3.Zero;
 
-        // For legacy/editor emissive materials, the visible surface color is the
-        // emitter color.  For glTF emissiveTexture, the separate emissive atlas is
-        // the mask/color and emissiveFactor is the multiplier.
         Vec3 emissionSource = EmissiveTexture == null ? Sample(u, v) : EmissiveTexture.Sample(u, v);
         return emissionSource.Multiply(EmissionColor) * Emission;
+    }
+
+    /// <summary>Samples glTF emissive data in linear-light space.</summary>
+    public Vec3 SampleEmissionLinear(double u, double v)
+    {
+        if (Emission <= 0.0)
+            return Vec3.Zero;
+
+        Vec3 emissionSource = EmissiveTexture == null
+            ? SampleLinear(u, v)
+            : SrgbToLinear(EmissiveTexture.Sample(u, v));
+        return emissionSource.Multiply(EmissionColor) * Emission;
+    }
+
+    /// <summary>Samples glTF occlusion, where the red channel attenuates indirect lighting.</summary>
+    public double SampleOcclusion(double u, double v)
+    {
+        if (OcclusionTexture == null)
+            return 1.0;
+
+        double sampled = Math.Clamp(OcclusionTexture.Sample(u, v).X, 0.0, 1.0);
+        return 1.0 + (sampled - 1.0) * OcclusionStrength;
+    }
+
+    private static Vec3 SrgbToLinear(Vec3 value) => new(
+        SrgbChannelToLinear(value.X),
+        SrgbChannelToLinear(value.Y),
+        SrgbChannelToLinear(value.Z));
+
+    private static double SrgbChannelToLinear(double value)
+    {
+        value = Math.Clamp(value, 0.0, 1.0);
+        return value <= 0.04045
+            ? value / 12.92
+            : Math.Pow((value + 0.055) / 1.055, 2.4);
     }
 
     /// <summary>Returns a copy with a different base texture while preserving emission data.</summary>

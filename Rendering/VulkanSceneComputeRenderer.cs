@@ -253,74 +253,69 @@ public static class VulkanSceneComputeRenderer
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct GpuTriangle
     {
-        public readonly Vector4 A;
-        public readonly Vector4 B;
-        public readonly Vector4 C;
-        public readonly Vector4 BaseColor;
-        public readonly Vector4 Emission;
-        public readonly Vector4 MaterialParams; // x=alpha factor, y=metallic, z=roughness, w=transmission
-        public readonly Vector4 UvA;
-        public readonly Vector4 UvB;
-        public readonly Vector4 UvC;
-        public readonly Vector4 TextureInfo; // x=base texture index, y=has base, z=emissive texture index, w=has emissive
-        public readonly Vector4 TextureInfo2; // x=metallic/roughness texture index, y=has MR, z=normal texture index, w=has normal
+        // Position and UV padding components carry the three authored vertex
+        // normals. This preserves the original 11-vec4 record size while giving
+        // the ray tracer smooth glTF shading without another scene-sized buffer.
+        public readonly Vector4 A; // xyz=position A, w=normal A.x
+        public readonly Vector4 B; // xyz=position B, w=normal A.y
+        public readonly Vector4 C; // xyz=position C, w=normal A.z
+        public readonly Vector4 BaseColor; // rgb=linear factor, a=alpha factor
+        public readonly Vector4 Emission; // rgb=linear factor, a=strength
+        public readonly Vector4 MaterialParams; // x=metallic, y=roughness, z=transmission, w=normal scale
+        public readonly Vector4 UvA; // xy=UV A, zw=normal B.xy
+        public readonly Vector4 UvB; // xy=UV B, z=normal B.z, w=normal C.x
+        public readonly Vector4 UvC; // xy=UV C, zw=normal C.yz
+        public readonly Vector4 TextureInfo; // x=base index, y=emissive index, z=alpha/double-sided flags, w=alpha cutoff
+        public readonly Vector4 TextureInfo2; // x=MR index, y=normal index, z=occlusion index, w=occlusion strength
 
         public GpuTriangle(Triangle triangle, IReadOnlyDictionary<TextureMap, int> textureIds)
         {
-            A = ToVector4(triangle.A, 0.0f);
-            B = ToVector4(triangle.B, 0.0f);
-            C = ToVector4(triangle.C, 0.0f);
-            UvA = new Vector4((float)triangle.UvA.U, (float)triangle.UvA.V, 0.0f, 0.0f);
-            UvB = new Vector4((float)triangle.UvB.U, (float)triangle.UvB.V, 0.0f, 0.0f);
-            UvC = new Vector4((float)triangle.UvC.U, (float)triangle.UvC.V, 0.0f, 0.0f);
+            Vec3 normalA = triangle.NormalA.Normalize();
+            Vec3 normalB = triangle.NormalB.Normalize();
+            Vec3 normalC = triangle.NormalC.Normalize();
+            A = ToVector4(triangle.A, (float)normalA.X);
+            B = ToVector4(triangle.B, (float)normalA.Y);
+            C = ToVector4(triangle.C, (float)normalA.Z);
+            UvA = new Vector4((float)triangle.UvA.U, (float)triangle.UvA.V, (float)normalB.X, (float)normalB.Y);
+            UvB = new Vector4((float)triangle.UvB.U, (float)triangle.UvB.V, (float)normalB.Z, (float)normalC.X);
+            UvC = new Vector4((float)triangle.UvC.U, (float)triangle.UvC.V, (float)normalC.Y, (float)normalC.Z);
 
-            // Do not bake a single texture sample per triangle.  That was the
-            // source of the visible triangular/mosaic artifact on textured lamp
-            // shades and glTF atlas materials.  Store the material base-color
-            // factor here and let the shader sample the texture at the actual
-            // ray-hit UV coordinate.
-            Vec3 colorFactor = triangle.Material.Color;
-
-            // Texture-dependent material channels are sampled in the shader
-            // at the actual ray hit.  Do not bake them at the triangle centroid:
-            // that causes visible triangle mosaics on glTF atlas materials.
-            double metallic = triangle.Material.Metallic;
-            double roughness = triangle.Material.Roughness;
-            double alpha = triangle.Material.Alpha;
-            double transmission = triangle.Material.Transmission;
-
+            Material material = triangle.Material;
+            Vec3 colorFactor = material.Color;
             BaseColor = new Vector4(
-                (float)Math.Clamp(colorFactor.X, 0.0, 1.0),
-                (float)Math.Clamp(colorFactor.Y, 0.0, 1.0),
-                (float)Math.Clamp(colorFactor.Z, 0.0, 1.0),
-                1.0f);
+                (float)Math.Clamp(colorFactor.X, 0.0, 64.0),
+                (float)Math.Clamp(colorFactor.Y, 0.0, 64.0),
+                (float)Math.Clamp(colorFactor.Z, 0.0, 64.0),
+                (float)Math.Clamp(material.Alpha, 0.0, 1.0));
 
             Emission = new Vector4(
-                (float)Math.Max(0.0, triangle.Material.EmissionColor.X),
-                (float)Math.Max(0.0, triangle.Material.EmissionColor.Y),
-                (float)Math.Max(0.0, triangle.Material.EmissionColor.Z),
-                (float)Math.Max(0.0, triangle.Material.Emission));
+                (float)Math.Max(0.0, material.EmissionColor.X),
+                (float)Math.Max(0.0, material.EmissionColor.Y),
+                (float)Math.Max(0.0, material.EmissionColor.Z),
+                (float)Math.Max(0.0, material.Emission));
 
             MaterialParams = new Vector4(
-                (float)Math.Clamp(alpha, 0.0, 1.0),
-                (float)Math.Clamp(metallic, 0.0, 1.0),
-                (float)Math.Clamp(roughness, 0.02, 1.0),
-                (float)Math.Clamp(transmission, 0.0, 1.0));
+                (float)Math.Clamp(material.Metallic, 0.0, 1.0),
+                (float)Math.Clamp(material.Roughness, 0.02, 1.0),
+                (float)Math.Clamp(material.Transmission, 0.0, 1.0),
+                (float)material.NormalScale);
 
-            int baseTextureIndex = TextureIndex(textureIds, triangle.Material.Texture);
-            int emissiveTextureIndex = TextureIndex(textureIds, triangle.Material.EmissiveTexture);
-            int metallicRoughnessTextureIndex = TextureIndex(textureIds, triangle.Material.MetallicRoughnessTexture);
-            int normalTextureIndex = TextureIndex(textureIds, triangle.Material.NormalTexture);
+            int baseTextureIndex = TextureIndex(textureIds, material.Texture);
+            int emissiveTextureIndex = TextureIndex(textureIds, material.EmissiveTexture);
+            int metallicRoughnessTextureIndex = TextureIndex(textureIds, material.MetallicRoughnessTexture);
+            int normalTextureIndex = TextureIndex(textureIds, material.NormalTexture);
+            int occlusionTextureIndex = TextureIndex(textureIds, material.OcclusionTexture);
+            int alphaFlags = (int)material.AlphaMode | (material.DoubleSided ? 4 : 0);
             TextureInfo = new Vector4(
                 baseTextureIndex,
-                baseTextureIndex >= 0 ? 1.0f : 0.0f,
                 emissiveTextureIndex,
-                emissiveTextureIndex >= 0 ? 1.0f : 0.0f);
+                alphaFlags,
+                (float)material.AlphaCutoff);
             TextureInfo2 = new Vector4(
                 metallicRoughnessTextureIndex,
-                metallicRoughnessTextureIndex >= 0 ? 1.0f : 0.0f,
                 normalTextureIndex,
-                normalTextureIndex >= 0 ? 1.0f : 0.0f);
+                occlusionTextureIndex,
+                (float)material.OcclusionStrength);
         }
 
         private static int TextureIndex(IReadOnlyDictionary<TextureMap, int> textureIds, TextureMap? texture)
@@ -725,7 +720,7 @@ public static class VulkanSceneComputeRenderer
         RenderImage image = ReadBackOutputImage(gd, factory, outputBuffer, stagingBuffer, outputBytes, width, height, cancellationToken, "final readback");
         string triangleTruncated = sourceTriangleCount > uploadedTriangleCount ? $", triangles truncated from {sourceTriangleCount}" : string.Empty;
         string lightTruncated = sourceLightCount > uploadedLightCount ? $", lights truncated from {sourceLightCount}" : string.Empty;
-        details = $"VULKAN GPU COMPUTE BVH TRACE - {width}x{height}, {uploadedTriangleCount} triangles{triangleTruncated}, {uploadedBvhNodeCount} BVH nodes, {uploadedLightCount} lights{lightTruncated}, textures={prepared.TextureCount}, material=uv+mr+normal, bounces={Math.Clamp(bounceCount, 0, 8)}, samples={sampleIndex + 1}-{sampleIndex + sampleCount}, fov={fieldOfViewDegrees:0.##}, exposure={settings.Exposure:0.###}, ambient={settings.AmbientStrength:0.###}, shadows={settings.UseShadows}, tileRows={tileRows}";
+        details = $"VULKAN GPU COMPUTE BVH TRACE - {width}x{height}, {uploadedTriangleCount} triangles{triangleTruncated}, {uploadedBvhNodeCount} BVH nodes, {uploadedLightCount} lights{lightTruncated}, textures={prepared.TextureCount}, material=linear-srgb+pbr+smooth-normal+normal-map+occlusion+ibl, bounces={Math.Clamp(bounceCount, 0, 8)}, samples={sampleIndex + 1}-{sampleIndex + sampleCount}, fov={fieldOfViewDegrees:0.##}, exposure={settings.Exposure:0.###}, ambient={settings.AmbientStrength:0.###}, shadows={settings.UseShadows}, tileRows={tileRows}";
         Stage("Render completed successfully");
         return image;
     }
@@ -1467,6 +1462,7 @@ public static class VulkanSceneComputeRenderer
             AddUnique(triangle.Material.EmissiveTexture);
             AddUnique(triangle.Material.MetallicRoughnessTexture);
             AddUnique(triangle.Material.NormalTexture);
+            AddUnique(triangle.Material.OcclusionTexture);
         }
 
         if (textures.Count == 0)

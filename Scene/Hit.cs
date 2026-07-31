@@ -21,9 +21,20 @@ public sealed class Hit
     public int GroupId { get; }
     public double TextureU { get; }
     public double TextureV { get; }
+    public Vec3 Tangent { get; }
+    public Vec3 Bitangent { get; }
 
     /// <summary>Constructs and initializes this component.</summary>
-    public Hit(double t, Vec3 point, Vec3 normal, Material material, int groupId = -1, double textureU = 0.0, double textureV = 0.0)
+    public Hit(
+        double t,
+        Vec3 point,
+        Vec3 normal,
+        Material material,
+        int groupId = -1,
+        double textureU = 0.0,
+        double textureV = 0.0,
+        Vec3? tangent = null,
+        Vec3? bitangent = null)
     {
         T = t;
         Point = point;
@@ -32,5 +43,7 @@ public sealed class Hit
         GroupId = groupId;
         TextureU = textureU;
         TextureV = textureV;
+        Tangent = tangent ?? Vec3.Zero;
+        Bitangent = bitangent ?? Vec3.Zero;
     }
 }

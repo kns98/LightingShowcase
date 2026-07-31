@@ -90,7 +90,44 @@ public sealed class Triangle
         Vec3 shadingNormal = NormalizeOrFallback(NormalA * w + NormalB * u + NormalC * v, Normal);
         if (shadingNormal.Dot(Normal) < 0.0)
             shadingNormal = -shadingNormal;
-        return new Hit(t, ray.Origin + ray.Direction * t, shadingNormal, Material, GroupId, uv.U, uv.V);
+
+        BuildTangentBasis(shadingNormal, out Vec3 tangent, out Vec3 bitangent);
+        return new Hit(
+            t,
+            ray.Origin + ray.Direction * t,
+            shadingNormal,
+            Material,
+            GroupId,
+            uv.U,
+            uv.V,
+            tangent,
+            bitangent);
+    }
+
+    private void BuildTangentBasis(Vec3 shadingNormal, out Vec3 tangent, out Vec3 bitangent)
+    {
+        Vec2 deltaUv1 = new(UvB.U - UvA.U, UvB.V - UvA.V);
+        Vec2 deltaUv2 = new(UvC.U - UvA.U, UvC.V - UvA.V);
+        double determinant = deltaUv1.U * deltaUv2.V - deltaUv1.V * deltaUv2.U;
+        if (Math.Abs(determinant) > 1e-12)
+        {
+            double inverse = 1.0 / determinant;
+            Vec3 rawTangent = (edge1 * deltaUv2.V - edge2 * deltaUv1.V) * inverse;
+            Vec3 rawBitangent = (edge2 * deltaUv1.U - edge1 * deltaUv2.U) * inverse;
+            tangent = (rawTangent - shadingNormal * shadingNormal.Dot(rawTangent)).Normalize();
+            if (tangent.Length() > 1e-8)
+            {
+                double handedness = shadingNormal.Cross(tangent).Dot(rawBitangent) < 0.0 ? -1.0 : 1.0;
+                bitangent = shadingNormal.Cross(tangent).Normalize() * handedness;
+                return;
+            }
+        }
+
+        Vec3 axis = Math.Abs(shadingNormal.Z) < 0.999
+            ? new Vec3(0.0, 0.0, 1.0)
+            : new Vec3(0.0, 1.0, 0.0);
+        tangent = axis.Cross(shadingNormal).Normalize();
+        bitangent = shadingNormal.Cross(tangent).Normalize();
     }
 
     private static Vec3 NormalizeOrFallback(Vec3 value, Vec3 fallback)
