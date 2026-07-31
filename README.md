@@ -147,7 +147,7 @@ Launch a published build with a scene path:
 ./LightingShowcase.Preview /path/to/scene.gltf
 ```
 
-You can also start it without a scene and type a local path into the toolbar:
+You can also start it without a scene and use **Open…** to select a local scene/model:
 
 ```bash
 ./LightingShowcase.Preview
@@ -168,6 +168,16 @@ Interaction policy:
 - **CPU** uses a reduced-resolution one-sample path preview and always renders after the mouse is released. This avoids locking the UI into a queue of slow CPU frames.
 
 The preview keeps assets external. Textures and buffers are resolved from the same directory tree as the selected scene; nothing is bundled into the scene or application package.
+
+Large-scene Vulkan memory behavior:
+
+- Vulkan compute and Vulkan raster always attempt the complete scene; there is no configurable safety budget or triangle sampling threshold.
+- Scene-sized GPU buffers are cached only for the active Vulkan renderer. Switching backends or loading another model releases the inactive scene first.
+- Geometry is packed and uploaded in small fixed-size chunks, so CPU upload memory does not scale with the full vertex or triangle buffer. Vulkan raster also stores one material record per shared material rather than one record per triangle.
+- Vulkan compute stores only an integer triangle-order array and compact CPU BVH nodes, then streams GPU triangles and GPU nodes in small chunks instead of allocating complete upload arrays.
+- Texture pixels are uploaded one texture at a time. Vulkan raster does not build a full CPU-side atlas, and Vulkan compute does not concatenate every texture into one managed array.
+- Vulkan raster keeps only one framebuffer target size cached to minimize color, depth, and readback allocations.
+- Hardware/API limits still apply, including Vulkan's per-buffer size and maximum texture-dimension constraints.
 
 On minimal Ubuntu or WSL installations, install the common Avalonia/X11 libraries:
 

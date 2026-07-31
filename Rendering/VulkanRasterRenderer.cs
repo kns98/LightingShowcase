@@ -31,6 +31,7 @@ public static class VulkanRasterRenderer
     private const double CameraFovDegrees = 72.0;
     private const double CameraNear = 0.035;
     private const double CameraFar = 5000.0;
+    private const int MaxTextureAtlasDimension = 8192;
 
     // Default to per-fragment GPU texture sampling so high-frequency glTF atlas
     // textures match the CPU shadow rasterizer. Set
@@ -63,7 +64,7 @@ public static class VulkanRasterRenderer
     // Interactive and settled frames use different resolutions. Keep a small
     // LRU so orbit/release does not recreate color, depth, staging and sync
     // resources every time the viewer switches between those sizes.
-    private const int MaxCachedTargetSizes = 3;
+    private const int MaxCachedTargetSizes = 1;
     private static readonly Dictionary<(int Width, int Height), RasterTargets> sharedTargets = new();
     private static long targetUseSerial;
     private static bool preflightCompleted;
@@ -102,10 +103,17 @@ public static class VulkanRasterRenderer
         public required Texture AtlasTexture { get; init; }
         public required Sampler AtlasSampler { get; init; }
         public required ResourceSet ResourceSet { get; init; }
-        public required RasterGeometryBuildResult Geometry { get; init; }
-        public required RasterLight[] Lights { get; init; }
+        public required int LightCount { get; init; }
+        public required int OpaqueVertexCount { get; init; }
+        public required int TransparentVertexCount { get; init; }
+        public required int MaterialCount { get; init; }
+        public required int SourceTriangleCount { get; init; }
+        public required int TotalTriangleCount { get; init; }
+        public required int NearClippedTriangleCount { get; init; }
         public required int TextureCount { get; init; }
+        public required bool GpuTextureSamplingRequested { get; init; }
         public required bool UsesGpuTextureSampling { get; init; }
+        public string? TextureFallbackReason { get; init; }
         public required double BoundingRadius { get; init; }
         public required Vec3 BoundingCenter { get; init; }
 
@@ -150,31 +158,15 @@ public static class VulkanRasterRenderer
     {
         public readonly Vector3 Position;
         public readonly Vector3 Normal;
-        public readonly Vector4 ColorAlpha;
-        public readonly Vector4 UvTexture;
-        public readonly Vector4 AtlasTransform;
-        public readonly Vector4 TextureAddress;
-        public readonly Vector4 TextureTransform;
-        public readonly Vector4 Emission;
+        public readonly Vector2 Uv;
+        public readonly float MaterialIndex;
 
-        public RasterVertex(Vec3 position, Vec3 normal, Vec2 uv, Material material, RasterTexturePlacement texturePlacement)
+        public RasterVertex(Vec3 position, Vec3 normal, Vec2 uv, int materialIndex)
         {
             Position = ToVector3(position);
             Normal = ToVector3(normal.Normalize());
-            ColorAlpha = texturePlacement.HasTexture
-                ? MaterialColorAlpha(material)
-                : BakedMaterialColorAlpha(material, uv);
-            UvTexture = new Vector4(
-                (float)uv.U,
-                (float)uv.V,
-                0.0f,
-                texturePlacement.HasTexture ? 1.0f : 0.0f);
-            AtlasTransform = texturePlacement.AtlasTransform;
-            TextureAddress = texturePlacement.TextureAddress;
-            TextureTransform = texturePlacement.TextureTransform;
-            Emission = texturePlacement.HasTexture
-                ? MaterialEmission(material)
-                : BakedMaterialEmission(material, uv);
+            Uv = new Vector2((float)uv.U, (float)uv.V);
+            MaterialIndex = materialIndex;
         }
     }
 
@@ -264,32 +256,52 @@ public static class VulkanRasterRenderer
     {
         public readonly Vector4 ColorAlpha;
         public readonly Vector4 Emission;
+        public readonly Vector4 AtlasTransform;
+        public readonly Vector4 TextureAddress;
+        public readonly Vector4 TextureTransform;
+        public readonly Vector4 TextureInfo; // x=has base texture
 
-        public RasterMaterial(Triangle triangle)
+        public RasterMaterial(Material material, RasterTexturePlacement texturePlacement)
         {
-            Material material = triangle.Material;
+            bool hasTexture = texturePlacement.HasTexture;
             ColorAlpha = MaterialColorAlpha(material);
             Emission = MaterialEmission(material);
+            AtlasTransform = texturePlacement.AtlasTransform;
+            TextureAddress = texturePlacement.TextureAddress;
+            TextureTransform = texturePlacement.TextureTransform;
+            TextureInfo = new Vector4(hasTexture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
         }
+    }
+
+    private sealed class RasterTextureUpload
+    {
+        public required TextureMap Texture { get; init; }
+        public required int X { get; init; }
+        public required int Y { get; init; }
     }
 
     private sealed class TextureBuildResult
     {
         public required IReadOnlyDictionary<TextureMap, RasterTexturePlacement> TexturePlacements { get; init; }
-        public required uint[] Pixels { get; init; }
+        public required IReadOnlyList<RasterTextureUpload> Uploads { get; init; }
         public required int Width { get; init; }
         public required int Height { get; init; }
         public required int TextureCount { get; init; }
+        public required bool UsesGpuTextureSampling { get; init; }
+        public string? FallbackReason { get; init; }
     }
 
     private sealed class RasterGeometryBuildResult
     {
-        public required RasterVertex[] OpaqueVertices { get; init; }
-        public required RasterVertex[] TransparentVertices { get; init; }
-        public required RasterMaterial[] Materials { get; init; }
+        public required IReadOnlyDictionary<Material, int> MaterialIds { get; init; }
+        public required RasterMaterial[] Materials { get; set; }
+        public int RenderableTriangleCount { get; init; }
         public int NearClippedTriangles { get; init; }
-        public int TotalVertices => OpaqueVertices.Length + TransparentVertices.Length;
-        public int TotalTriangles => TotalVertices / 3;
+        public int SourceTriangleCount { get; init; }
+        public int OpaqueVertexCount => checked(RenderableTriangleCount * 3);
+        public int TransparentVertexCount => 0;
+        public int MaterialCount => Materials.Length;
+        public int TotalTriangles => RenderableTriangleCount;
     }
 
     /// <summary>Releases the shared Vulkan graphics device and compiled raster pipeline.</summary>
@@ -326,6 +338,28 @@ public static class VulkanRasterRenderer
                 {
                     try { Stage("Dispose shared Vulkan raster GraphicsDevice"); device.Dispose(); } catch { }
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Releases scene-sized Vulkan buffers while keeping the device, pipelines,
+    /// and small render-target cache alive. Call this before replacing a large
+    /// scene so the old GPU allocation does not overlap the new scene load.
+    /// </summary>
+    public static void ReleasePreparedScene()
+    {
+        lock (RenderSync)
+        {
+            lock (DeviceSync)
+            {
+                PreparedRasterScene? sceneResources = preparedScene;
+                preparedScene = null;
+                if (sceneResources == null)
+                    return;
+
+                try { sharedGraphicsDevice?.WaitForIdle(); } catch { }
+                try { sceneResources.Dispose(); } catch { }
             }
         }
     }
@@ -384,8 +418,8 @@ public static class VulkanRasterRenderer
         phase.Restart();
         double cameraFar = ComputeCachedCameraFarPlane(prepared, cameraPosition);
         gd.UpdateBuffer(prepared.CameraBuffer, 0, new RasterCameraConstants(
-            cameraPosition, basis, width, height, prepared.Lights.Length, prepared.TextureCount,
-            RasterDebugMode, prepared.Geometry.Materials.Length, cameraFar));
+            cameraPosition, basis, width, height, prepared.LightCount, prepared.TextureCount,
+            RasterDebugMode, prepared.MaterialCount, cameraFar));
         long uniformMs = phase.ElapsedMilliseconds;
 
         ThrowIfCancellationRequested(cancellationToken, "record Vulkan raster command list");
@@ -395,19 +429,19 @@ public static class VulkanRasterRenderer
         commandList.SetFramebuffer(targets.Framebuffer);
         commandList.ClearColorTarget(0, new RgbaFloat(0.010f, 0.012f, 0.016f, 1.0f));
         commandList.ClearDepthStencil(1.0f);
-        if (prepared.Geometry.OpaqueVertices.Length > 0)
+        if (prepared.OpaqueVertexCount > 0)
         {
             commandList.SetPipeline(resources.OpaquePipeline);
             commandList.SetGraphicsResourceSet(0, prepared.ResourceSet);
             commandList.SetVertexBuffer(0, prepared.OpaqueVertexBuffer);
-            commandList.Draw((uint)prepared.Geometry.OpaqueVertices.Length);
+            commandList.Draw((uint)prepared.OpaqueVertexCount);
         }
-        if (prepared.Geometry.TransparentVertices.Length > 0)
+        if (prepared.TransparentVertexCount > 0)
         {
             commandList.SetPipeline(resources.TransparentPipeline);
             commandList.SetGraphicsResourceSet(0, prepared.ResourceSet);
             commandList.SetVertexBuffer(0, prepared.TransparentVertexBuffer);
-            commandList.Draw((uint)prepared.Geometry.TransparentVertices.Length);
+            commandList.Draw((uint)prepared.TransparentVertexCount);
         }
         commandList.CopyTexture(targets.ColorTexture, 0, 0, 0, 0, 0,
             targets.StagingTexture, 0, 0, 0, 0, 0, (uint)width, (uint)height, 1, 1);
@@ -427,42 +461,228 @@ public static class VulkanRasterRenderer
         long readbackMs = phase.ElapsedMilliseconds;
         total.Stop();
 
-        details = $"VULKAN RASTER CACHED - {width}x{height}, triangles={prepared.Geometry.TotalTriangles}, lights={prepared.Lights.Length}, textures={prepared.TextureCount}, cache={(prepareMs == 0 ? "hot" : "ready")}, device={deviceMs}ms, targets={targetMs}ms, prepare={prepareMs}ms, uniform={uniformMs}ms, record={recordMs}ms, gpu+wait={gpuWaitMs}ms, readback={readbackMs}ms, total={total.ElapsedMilliseconds}ms";
+        string textureMode = prepared.UsesGpuTextureSampling
+            ? $"textures={prepared.TextureCount}"
+            : prepared.GpuTextureSamplingRequested && !string.IsNullOrWhiteSpace(prepared.TextureFallbackReason)
+                ? $"textures=base-color fallback ({prepared.TextureFallbackReason})"
+                : "textures=base color";
+        string triangleMode = prepared.NearClippedTriangleCount > 0
+            ? $"triangles={prepared.TotalTriangleCount}/{prepared.SourceTriangleCount} ({prepared.NearClippedTriangleCount} invalid skipped)"
+            : $"triangles={prepared.TotalTriangleCount}";
+        details = $"VULKAN RASTER CACHED - {width}x{height}, {triangleMode}, lights={prepared.LightCount}, {textureMode}, cache={(prepareMs == 0 ? "hot" : "ready")}, device={deviceMs}ms, targets={targetMs}ms, prepare={prepareMs}ms, uniform={uniformMs}ms, record={recordMs}ms, gpu+wait={gpuWaitMs}ms, readback={readbackMs}ms, total={total.ElapsedMilliseconds}ms";
         Stage(details);
         return image;
     }
 
     private static PreparedRasterScene GetOrCreatePreparedScene(GraphicsDevice gd, SharedRasterResources resources, Scene scene, CancellationToken cancellationToken)
     {
-        if (preparedScene != null && ReferenceEquals(preparedScene.Scene, scene) && preparedScene.UsesGpuTextureSampling == UseGpuTextureSampling)
+        bool gpuTextureSamplingRequested = UseGpuTextureSampling;
+        if (preparedScene != null &&
+            ReferenceEquals(preparedScene.Scene, scene) &&
+            preparedScene.GpuTextureSamplingRequested == gpuTextureSamplingRequested)
             return preparedScene;
 
         preparedScene?.Dispose();
         preparedScene = null;
         ThrowIfCancellationRequested(cancellationToken, "build cached Vulkan scene");
-        TextureBuildResult textures = BuildTextureAtlas(scene);
-        RasterGeometryBuildResult geometry = BuildGeometryBuffers(scene, textures.TexturePlacements, default, default, UseGpuTextureSampling);
+
+        // Build only lightweight atlas placement metadata first. Pixel data is
+        // transferred one texture at a time after the Vulkan texture exists, so
+        // a full CPU-side atlas never coexists with the GPU atlas.
+        TextureBuildResult textures = BuildTextureAtlas(scene, gpuTextureSamplingRequested);
+        RasterGeometryBuildResult geometry = BuildGeometryMetadata(scene, textures.TexturePlacements, textures.UsesGpuTextureSampling);
         RasterLight[] lights = BuildLightBuffer(scene);
         ResourceFactory factory = gd.ResourceFactory;
         int vertexStride = Marshal.SizeOf<RasterVertex>();
         int lightStride = Marshal.SizeOf<RasterLight>();
         int materialStride = Marshal.SizeOf<RasterMaterial>();
-        DeviceBuffer opaque = factory.CreateBuffer(new BufferDescription(checked((uint)Math.Max(vertexStride, geometry.OpaqueVertices.Length * vertexStride)), BufferUsage.VertexBuffer));
-        DeviceBuffer transparent = factory.CreateBuffer(new BufferDescription(checked((uint)Math.Max(vertexStride, geometry.TransparentVertices.Length * vertexStride)), BufferUsage.VertexBuffer));
-        DeviceBuffer camera = factory.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<RasterCameraConstants>(), BufferUsage.UniformBuffer));
-        DeviceBuffer light = factory.CreateBuffer(new BufferDescription(checked((uint)Math.Max(lightStride, lights.Length * lightStride)), BufferUsage.StructuredBufferReadOnly, (uint)lightStride));
-        DeviceBuffer material = factory.CreateBuffer(new BufferDescription(checked((uint)Math.Max(materialStride, geometry.Materials.Length * materialStride)), BufferUsage.StructuredBufferReadOnly, (uint)materialStride));
-        Texture atlas = factory.CreateTexture(TextureDescription.Texture2D((uint)textures.Width, (uint)textures.Height, 1, 1, Veldrid.PixelFormat.R8_G8_B8_A8_UNorm, TextureUsage.Sampled));
-        Sampler sampler = factory.CreateSampler(SamplerDescription.Linear);
-        if (geometry.OpaqueVertices.Length > 0) gd.UpdateBuffer(opaque, 0, geometry.OpaqueVertices);
-        if (geometry.TransparentVertices.Length > 0) gd.UpdateBuffer(transparent, 0, geometry.TransparentVertices);
-        gd.UpdateBuffer(light, 0, lights.Length == 0 ? new[] { default(RasterLight) } : lights);
-        gd.UpdateBuffer(material, 0, geometry.Materials.Length == 0 ? new[] { default(RasterMaterial) } : geometry.Materials);
-        gd.UpdateTexture(atlas, textures.Pixels, 0, 0, 0, (uint)textures.Width, (uint)textures.Height, 1, 0, 0);
-        ResourceSet set = factory.CreateResourceSet(new ResourceSetDescription(resources.Layout, camera, light, material, atlas, sampler));
-        ComputeSceneBounds(scene, out Vec3 center, out double radius);
-        preparedScene = new PreparedRasterScene { Scene=scene, OpaqueVertexBuffer=opaque, TransparentVertexBuffer=transparent, CameraBuffer=camera, LightBuffer=light, MaterialBuffer=material, AtlasTexture=atlas, AtlasSampler=sampler, ResourceSet=set, Geometry=geometry, Lights=lights, TextureCount=textures.TextureCount, UsesGpuTextureSampling=UseGpuTextureSampling, BoundingCenter=center, BoundingRadius=radius };
-        return preparedScene;
+        int opaqueVertexCount = geometry.OpaqueVertexCount;
+        int transparentVertexCount = geometry.TransparentVertexCount;
+        int materialCount = geometry.MaterialCount;
+        int totalTriangleCount = geometry.TotalTriangles;
+        int nearClippedTriangleCount = geometry.NearClippedTriangles;
+
+        uint opaqueBytes = CheckedBufferSize((long)opaqueVertexCount * vertexStride, vertexStride, "opaque vertex");
+        uint transparentBytes = CheckedBufferSize((long)transparentVertexCount * vertexStride, vertexStride, "transparent vertex");
+        uint lightBytes = CheckedBufferSize((long)lights.Length * lightStride, lightStride, "light");
+        uint materialBytes = CheckedBufferSize((long)materialCount * materialStride, materialStride, "material");
+
+        DeviceBuffer? opaque = null;
+        DeviceBuffer? transparent = null;
+        DeviceBuffer? camera = null;
+        DeviceBuffer? light = null;
+        DeviceBuffer? material = null;
+        Texture? atlas = null;
+        Sampler? sampler = null;
+        ResourceSet? set = null;
+        try
+        {
+            opaque = factory.CreateBuffer(new BufferDescription(opaqueBytes, BufferUsage.VertexBuffer));
+            transparent = factory.CreateBuffer(new BufferDescription(transparentBytes, BufferUsage.VertexBuffer));
+            camera = factory.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<RasterCameraConstants>(), BufferUsage.UniformBuffer));
+            light = factory.CreateBuffer(new BufferDescription(lightBytes, BufferUsage.StructuredBufferReadOnly, (uint)lightStride));
+            material = factory.CreateBuffer(new BufferDescription(materialBytes, BufferUsage.StructuredBufferReadOnly, (uint)materialStride));
+            atlas = factory.CreateTexture(TextureDescription.Texture2D((uint)textures.Width, (uint)textures.Height, 1, 1, Veldrid.PixelFormat.R8_G8_B8_A8_UNorm, TextureUsage.Sampled));
+            sampler = factory.CreateSampler(SamplerDescription.Linear);
+
+            UploadRasterGeometry(gd, opaque, scene, geometry.MaterialIds, cancellationToken);
+            gd.UpdateBuffer(material, 0, geometry.Materials.Length == 0 ? new[] { default(RasterMaterial) } : geometry.Materials);
+            geometry.Materials = Array.Empty<RasterMaterial>();
+            gd.UpdateBuffer(light, 0, lights.Length == 0 ? new[] { default(RasterLight) } : lights);
+            UploadTextureAtlas(gd, atlas, textures, cancellationToken);
+
+            set = factory.CreateResourceSet(new ResourceSetDescription(resources.Layout, camera, light, material, atlas, sampler));
+            ComputeSceneBounds(scene, out Vec3 center, out double radius);
+            preparedScene = new PreparedRasterScene
+            {
+                Scene = scene,
+                OpaqueVertexBuffer = opaque,
+                TransparentVertexBuffer = transparent,
+                CameraBuffer = camera,
+                LightBuffer = light,
+                MaterialBuffer = material,
+                AtlasTexture = atlas,
+                AtlasSampler = sampler,
+                ResourceSet = set,
+                LightCount = lights.Length,
+                OpaqueVertexCount = opaqueVertexCount,
+                TransparentVertexCount = transparentVertexCount,
+                MaterialCount = materialCount,
+                SourceTriangleCount = geometry.SourceTriangleCount,
+                TotalTriangleCount = totalTriangleCount,
+                NearClippedTriangleCount = nearClippedTriangleCount,
+                TextureCount = textures.TextureCount,
+                GpuTextureSamplingRequested = gpuTextureSamplingRequested,
+                UsesGpuTextureSampling = textures.UsesGpuTextureSampling,
+                TextureFallbackReason = textures.FallbackReason,
+                BoundingCenter = center,
+                BoundingRadius = radius
+            };
+            return preparedScene;
+        }
+        catch
+        {
+            try { set?.Dispose(); } catch { }
+            try { sampler?.Dispose(); } catch { }
+            try { atlas?.Dispose(); } catch { }
+            try { material?.Dispose(); } catch { }
+            try { light?.Dispose(); } catch { }
+            try { camera?.Dispose(); } catch { }
+            try { transparent?.Dispose(); } catch { }
+            try { opaque?.Dispose(); } catch { }
+            throw;
+        }
+    }
+
+    private static void UploadRasterGeometry(
+        GraphicsDevice gd,
+        DeviceBuffer vertexBuffer,
+        Scene scene,
+        IReadOnlyDictionary<Material, int> materialIds,
+        CancellationToken cancellationToken)
+    {
+        // Keep upload memory constant. The old path allocated arrays sized for
+        // the complete scene while the same data was also being staged by the
+        // Vulkan driver.
+        const int TrianglesPerChunk = 2048;
+        int vertexStride = Marshal.SizeOf<RasterVertex>();
+        RasterVertex[] vertices = new RasterVertex[TrianglesPerChunk * 3];
+        int trianglesInChunk = 0;
+        int uploadedTriangles = 0;
+
+        foreach (Triangle triangle in scene.Triangles)
+        {
+            if (!IsFinite(triangle.A) || !IsFinite(triangle.B) || !IsFinite(triangle.C) || !IsFinite(triangle.Normal))
+                continue;
+
+            int materialIndex = materialIds[triangle.Material];
+            Vec3 normal = triangle.Normal.Normalize();
+            int vertexIndex = trianglesInChunk * 3;
+            vertices[vertexIndex] = new RasterVertex(triangle.A, normal, triangle.UvA, materialIndex);
+            vertices[vertexIndex + 1] = new RasterVertex(triangle.B, normal, triangle.UvB, materialIndex);
+            vertices[vertexIndex + 2] = new RasterVertex(triangle.C, normal, triangle.UvC, materialIndex);
+            trianglesInChunk++;
+
+            if (trianglesInChunk == TrianglesPerChunk)
+            {
+                UploadChunk(trianglesInChunk);
+                trianglesInChunk = 0;
+                ThrowIfCancellationRequested(cancellationToken, "upload Vulkan raster geometry");
+            }
+        }
+
+        if (trianglesInChunk > 0)
+            UploadChunk(trianglesInChunk);
+
+        void UploadChunk(int triangleCount)
+        {
+            RasterVertex[] vertexUpload = vertices;
+            if (triangleCount != TrianglesPerChunk)
+            {
+                vertexUpload = new RasterVertex[triangleCount * 3];
+                Array.Copy(vertices, vertexUpload, vertexUpload.Length);
+            }
+
+            uint vertexOffset = checked((uint)((long)uploadedTriangles * 3L * vertexStride));
+            gd.UpdateBuffer(vertexBuffer, vertexOffset, vertexUpload);
+            uploadedTriangles += triangleCount;
+        }
+    }
+
+    private static void UploadTextureAtlas(GraphicsDevice gd, Texture atlas, TextureBuildResult textures, CancellationToken cancellationToken)
+    {
+        if (textures.Uploads.Count == 0)
+        {
+            gd.UpdateTexture(atlas, new[] { 0xffffffffu }, 0, 0, 0, 1, 1, 1, 0, 0);
+            return;
+        }
+
+        foreach (RasterTextureUpload upload in textures.Uploads)
+        {
+            ThrowIfCancellationRequested(cancellationToken, "upload Vulkan raster texture atlas");
+            TextureMap texture = upload.Texture;
+            int width = Math.Max(1, texture.Width);
+            int height = Math.Max(1, texture.Height);
+            uint[] source = texture.CopyPackedRgba32Pixels();
+            int expectedPixels = checked(width * height);
+            if (source.Length != expectedPixels)
+                throw new InvalidOperationException($"Texture '{texture.Name}' returned {source.Length} pixels; expected {expectedPixels}.");
+
+            gd.UpdateTexture(atlas, source, (uint)upload.X, (uint)upload.Y, 0, (uint)width, (uint)height, 1, 0, 0);
+
+            // Upload only the one-pixel borders needed by linear filtering.
+            // This avoids allocating a second padded copy of the whole texture.
+            uint[] top = new uint[width];
+            uint[] bottom = new uint[width];
+            Array.Copy(source, 0, top, 0, width);
+            Array.Copy(source, (height - 1) * width, bottom, 0, width);
+            gd.UpdateTexture(atlas, top, (uint)upload.X, (uint)(upload.Y - 1), 0, (uint)width, 1, 1, 0, 0);
+            gd.UpdateTexture(atlas, bottom, (uint)upload.X, (uint)(upload.Y + height), 0, (uint)width, 1, 1, 0, 0);
+
+            uint[] left = new uint[height];
+            uint[] right = new uint[height];
+            for (int y = 0; y < height; y++)
+            {
+                left[y] = source[y * width];
+                right[y] = source[y * width + width - 1];
+            }
+            gd.UpdateTexture(atlas, left, (uint)(upload.X - 1), (uint)upload.Y, 0, 1, (uint)height, 1, 0, 0);
+            gd.UpdateTexture(atlas, right, (uint)(upload.X + width), (uint)upload.Y, 0, 1, (uint)height, 1, 0, 0);
+
+            gd.UpdateTexture(atlas, new[] { source[0] }, (uint)(upload.X - 1), (uint)(upload.Y - 1), 0, 1, 1, 1, 0, 0);
+            gd.UpdateTexture(atlas, new[] { source[width - 1] }, (uint)(upload.X + width), (uint)(upload.Y - 1), 0, 1, 1, 1, 0, 0);
+            gd.UpdateTexture(atlas, new[] { source[(height - 1) * width] }, (uint)(upload.X - 1), (uint)(upload.Y + height), 0, 1, 1, 1, 0, 0);
+            gd.UpdateTexture(atlas, new[] { source[source.Length - 1] }, (uint)(upload.X + width), (uint)(upload.Y + height), 0, 1, 1, 1, 0, 0);
+            source = Array.Empty<uint>();
+        }
+    }
+
+    private static uint CheckedBufferSize(long requestedBytes, int minimumBytes, string label)
+    {
+        long bytes = Math.Max(minimumBytes, requestedBytes);
+        if (bytes > uint.MaxValue)
+            throw new InvalidOperationException($"The Vulkan {label} buffer would require {bytes / (1024.0 * 1024.0):F0} MB, which exceeds the 4 GB buffer limit.");
+        return checked((uint)bytes);
     }
 
     private static RasterTargets GetOrCreateTargets(GraphicsDevice gd, int width, int height)
@@ -509,9 +729,19 @@ public static class VulkanRasterRenderer
         if (scene.Triangles.Count == 0) { center = Vec3.Zero; radius = 10; return; }
         Vec3 min = scene.Triangles[0].A, max = min;
         foreach (Triangle t in scene.Triangles)
-            foreach (Vec3 p in new[] { t.A, t.B, t.C }) { min = new Vec3(Math.Min(min.X,p.X), Math.Min(min.Y,p.Y), Math.Min(min.Z,p.Z)); max = new Vec3(Math.Max(max.X,p.X), Math.Max(max.Y,p.Y), Math.Max(max.Z,p.Z)); }
+        {
+            Include(t.A);
+            Include(t.B);
+            Include(t.C);
+        }
         center = (min + max) / 2.0;
         radius = Math.Max(1.0, (max - center).Length());
+
+        void Include(Vec3 p)
+        {
+            min = new Vec3(Math.Min(min.X, p.X), Math.Min(min.Y, p.Y), Math.Min(min.Z, p.Z));
+            max = new Vec3(Math.Max(max.X, p.X), Math.Max(max.Y, p.Y), Math.Max(max.Z, p.Z));
+        }
     }
 
     private static double ComputeCachedCameraFarPlane(PreparedRasterScene scene, Vec3 cameraPosition) =>
@@ -581,12 +811,8 @@ public static class VulkanRasterRenderer
                     VertexLayoutDescription vertexLayout = new(
                         new VertexElementDescription("Position", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float3),
                         new VertexElementDescription("Normal", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float3),
-                        new VertexElementDescription("ColorAlpha", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4),
-                        new VertexElementDescription("UvTexture", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4),
-                        new VertexElementDescription("AtlasTransform", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4),
-                        new VertexElementDescription("TextureAddress", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4),
-                        new VertexElementDescription("TextureTransform", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4),
-                        new VertexElementDescription("Emission", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4));
+                        new VertexElementDescription("Uv", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float2),
+                        new VertexElementDescription("MaterialIndex", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float1));
 
                     RasterizerStateDescription rasterizerState = new(
                         cullMode: FaceCullMode.None,
@@ -694,52 +920,43 @@ public static class VulkanRasterRenderer
         }
     }
 
-    private static RasterGeometryBuildResult BuildGeometryBuffers(
+    private static RasterGeometryBuildResult BuildGeometryMetadata(
         Scene scene,
         IReadOnlyDictionary<TextureMap, RasterTexturePlacement> texturePlacements,
-        Vec3 cameraPosition,
-        CameraBasis basis,
         bool useGpuTextureSampling)
     {
-        List<RasterVertex> opaqueVertices = new(scene.Triangles.Count * 3);
-        List<RasterMaterial> materials = new(scene.Triangles.Count);
+        int renderableTriangleCount = 0;
         int nearClippedTriangles = 0;
+        Dictionary<Material, int> materialIds = new();
+        List<RasterMaterial> materials = new();
 
-        foreach (Triangle tri in scene.Triangles)
+        foreach (Triangle triangle in scene.Triangles)
         {
-            // Match ShadowRasterRenderer: reject whole triangles that fail the
-            // CPU camera projection rule, then let a normal z-buffer resolve
-            // visibility. Do not split transmissive/glass materials into a
-            // blended pass here; the CPU raster preview treats non-discarded
-            // material pixels as z-buffered surfaces, which gives much more
-            // reliable editor occlusion.
-            if (!IsFinite(tri.A) || !IsFinite(tri.B) || !IsFinite(tri.C) || !IsFinite(tri.Normal))
+            if (!IsFinite(triangle.A) || !IsFinite(triangle.B) || !IsFinite(triangle.C) || !IsFinite(triangle.Normal))
             {
                 nearClippedTriangles++;
                 continue;
             }
 
-            AddTriangleVertices(opaqueVertices, tri, texturePlacements, useGpuTextureSampling);
-            if (useGpuTextureSampling)
-                materials.Add(new RasterMaterial(tri));
+            renderableTriangleCount++;
+            if (!materialIds.ContainsKey(triangle.Material))
+            {
+                RasterTexturePlacement placement = useGpuTextureSampling
+                    ? TexturePlacement(texturePlacements, triangle.Material.Texture)
+                    : RasterTexturePlacement.None;
+                materialIds.Add(triangle.Material, materials.Count);
+                materials.Add(new RasterMaterial(triangle.Material, placement));
+            }
         }
 
         return new RasterGeometryBuildResult
         {
-            OpaqueVertices = opaqueVertices.ToArray(),
-            TransparentVertices = Array.Empty<RasterVertex>(),
+            MaterialIds = materialIds,
             Materials = materials.ToArray(),
-            NearClippedTriangles = nearClippedTriangles
+            RenderableTriangleCount = renderableTriangleCount,
+            NearClippedTriangles = nearClippedTriangles,
+            SourceTriangleCount = scene.Triangles.Count
         };
-    }
-
-    private static void AddTriangleVertices(List<RasterVertex> vertices, Triangle tri, IReadOnlyDictionary<TextureMap, RasterTexturePlacement> texturePlacements, bool useGpuTextureSampling)
-    {
-        RasterTexturePlacement texturePlacement = useGpuTextureSampling ? TexturePlacement(texturePlacements, tri.Material.Texture) : RasterTexturePlacement.None;
-        Vec3 normal = tri.Normal.Normalize();
-        vertices.Add(new RasterVertex(tri.A, normal, tri.UvA, tri.Material, texturePlacement));
-        vertices.Add(new RasterVertex(tri.B, normal, tri.UvB, tri.Material, texturePlacement));
-        vertices.Add(new RasterVertex(tri.C, normal, tri.UvC, tri.Material, texturePlacement));
     }
 
     private static double TriangleViewDepth(Triangle triangle, Vec3 cameraPosition, CameraBasis basis)
@@ -872,11 +1089,13 @@ public static class VulkanRasterRenderer
         }
     }
 
-    private static TextureBuildResult BuildTextureAtlas(Scene scene)
+    private static TextureBuildResult BuildTextureAtlas(Scene scene, bool gpuTextureSamplingRequested)
     {
+        if (!gpuTextureSamplingRequested)
+            return CreateBakedTextureResult(null);
+
         List<TextureMap> textures = new();
         HashSet<TextureMap> seen = new();
-
         foreach (Triangle triangle in scene.Triangles)
         {
             TextureMap? texture = triangle.Material.Texture;
@@ -889,96 +1108,139 @@ public static class VulkanRasterRenderer
             return new TextureBuildResult
             {
                 TexturePlacements = new Dictionary<TextureMap, RasterTexturePlacement>(),
-                Pixels = new[] { 0xffffffffu },
+                Uploads = Array.Empty<RasterTextureUpload>(),
                 Width = 1,
                 Height = 1,
-                TextureCount = 0
+                TextureCount = 0,
+                UsesGpuTextureSampling = true
             };
         }
 
         const int padding = 1;
-        long totalArea = textures.Sum(t => (long)(t.Width + padding * 2) * (t.Height + padding * 2));
-        int estimatedWidth = NextPowerOfTwo((int)Math.Ceiling(Math.Sqrt(Math.Max(1L, totalArea))));
-        int atlasWidth = Math.Max(256, Math.Max(estimatedWidth, textures.Max(t => t.Width + padding * 2)));
-        List<(TextureMap Texture, int X, int Y)> placements = new();
-        int cursorX = 0;
-        int cursorY = 0;
-        int rowHeight = 0;
-
-        foreach (TextureMap texture in textures.OrderByDescending(t => t.Height).ThenByDescending(t => t.Width))
+        List<TextureMap> sorted = textures
+            .OrderByDescending(texture => texture.Height)
+            .ThenByDescending(texture => texture.Width)
+            .ToList();
+        long totalArea = 0;
+        int largestEntryWidth = 1;
+        foreach (TextureMap texture in sorted)
         {
-            int entryWidth = texture.Width + padding * 2;
-            int entryHeight = texture.Height + padding * 2;
-            if (cursorX > 0 && cursorX + entryWidth > atlasWidth)
-            {
-                cursorY += rowHeight;
-                cursorX = 0;
-                rowHeight = 0;
-            }
-
-            placements.Add((texture, cursorX + padding, cursorY + padding));
-            cursorX += entryWidth;
-            rowHeight = Math.Max(rowHeight, entryHeight);
+            int entryWidth = checked(Math.Max(1, texture.Width) + padding * 2);
+            int entryHeight = checked(Math.Max(1, texture.Height) + padding * 2);
+            if (entryWidth > MaxTextureAtlasDimension || entryHeight > MaxTextureAtlasDimension)
+                return CreateBakedTextureResult($"a source texture exceeds {MaxTextureAtlasDimension}px");
+            totalArea = checked(totalArea + checked((long)entryWidth * entryHeight));
+            largestEntryWidth = Math.Max(largestEntryWidth, entryWidth);
         }
 
-        int atlasHeight = Math.Max(1, cursorY + rowHeight);
-        uint[] atlasPixels = Enumerable.Repeat(0xffffffffu, checked(atlasWidth * atlasHeight)).ToArray();
-        Dictionary<TextureMap, RasterTexturePlacement> texturePlacements = new();
+        int estimatedWidth = Math.Max(largestEntryWidth, (int)Math.Ceiling(Math.Sqrt(Math.Max(1L, totalArea))));
+        estimatedWidth = Math.Min(MaxTextureAtlasDimension, estimatedWidth);
 
-        foreach ((TextureMap texture, int x, int y) in placements)
+        List<int> candidateWidths = new();
+        AddCandidate(estimatedWidth);
+        AddCandidate((int)Math.Ceiling(estimatedWidth * 1.25));
+        AddCandidate((int)Math.Ceiling(estimatedWidth * 1.5));
+        AddCandidate(estimatedWidth * 2);
+        AddCandidate(MaxTextureAtlasDimension);
+
+        List<RasterTextureUpload>? bestUploads = null;
+        int bestWidth = 0;
+        int bestHeight = 0;
+        long bestArea = long.MaxValue;
+        foreach (int candidateWidth in candidateWidths)
         {
-            uint[] source = texture.CopyPackedRgba32Pixels();
-            CopyTextureIntoAtlas(source, texture.Width, texture.Height, atlasPixels, atlasWidth, atlasHeight, x, y);
-            float offsetX = (x + 0.5f) / atlasWidth;
-            float offsetY = (y + 0.5f) / atlasHeight;
-            float scaleX = texture.Width <= 1 ? 0.0f : (texture.Width - 1.0f) / atlasWidth;
-            float scaleY = texture.Height <= 1 ? 0.0f : (texture.Height - 1.0f) / atlasHeight;
+            if (!TryPack(candidateWidth, out List<RasterTextureUpload> uploads, out int height))
+                continue;
+            long area = checked((long)candidateWidth * height);
+            if (area < bestArea)
+            {
+                bestArea = area;
+                bestWidth = candidateWidth;
+                bestHeight = height;
+                bestUploads = uploads;
+            }
+        }
+
+        if (bestUploads == null)
+            return CreateBakedTextureResult($"atlas exceeds {MaxTextureAtlasDimension}px");
+
+        Dictionary<TextureMap, RasterTexturePlacement> texturePlacements = new(bestUploads.Count);
+        foreach (RasterTextureUpload upload in bestUploads)
+        {
+            TextureMap texture = upload.Texture;
+            float offsetX = (upload.X + 0.5f) / bestWidth;
+            float offsetY = (upload.Y + 0.5f) / bestHeight;
+            float scaleX = texture.Width <= 1 ? 0.0f : (texture.Width - 1.0f) / bestWidth;
+            float scaleY = texture.Height <= 1 ? 0.0f : (texture.Height - 1.0f) / bestHeight;
             texturePlacements[texture] = new RasterTexturePlacement(offsetX, offsetY, scaleX, scaleY, texture);
         }
 
         return new TextureBuildResult
         {
             TexturePlacements = texturePlacements,
-            Pixels = atlasPixels,
-            Width = atlasWidth,
-            Height = atlasHeight,
-            TextureCount = texturePlacements.Count
+            Uploads = bestUploads,
+            Width = bestWidth,
+            Height = bestHeight,
+            TextureCount = texturePlacements.Count,
+            UsesGpuTextureSampling = true
         };
+
+        void AddCandidate(int width)
+        {
+            width = Math.Clamp(width, largestEntryWidth, MaxTextureAtlasDimension);
+            if (!candidateWidths.Contains(width))
+                candidateWidths.Add(width);
+        }
+
+        bool TryPack(int atlasWidth, out List<RasterTextureUpload> uploads, out int atlasHeight)
+        {
+            uploads = new List<RasterTextureUpload>(sorted.Count);
+            int cursorX = 0;
+            int cursorY = 0;
+            int rowHeight = 0;
+            foreach (TextureMap texture in sorted)
+            {
+                int entryWidth = checked(Math.Max(1, texture.Width) + padding * 2);
+                int entryHeight = checked(Math.Max(1, texture.Height) + padding * 2);
+                if (cursorX > 0 && cursorX + entryWidth > atlasWidth)
+                {
+                    cursorY = checked(cursorY + rowHeight);
+                    cursorX = 0;
+                    rowHeight = 0;
+                }
+
+                if ((long)cursorY + entryHeight > MaxTextureAtlasDimension)
+                {
+                    atlasHeight = 0;
+                    uploads.Clear();
+                    return false;
+                }
+
+                uploads.Add(new RasterTextureUpload
+                {
+                    Texture = texture,
+                    X = cursorX + padding,
+                    Y = cursorY + padding
+                });
+                cursorX = checked(cursorX + entryWidth);
+                rowHeight = Math.Max(rowHeight, entryHeight);
+            }
+
+            atlasHeight = Math.Max(1, checked(cursorY + rowHeight));
+            return atlasHeight <= MaxTextureAtlasDimension;
+        }
     }
 
-    private static int NextPowerOfTwo(int value)
+    private static TextureBuildResult CreateBakedTextureResult(string? reason) => new()
     {
-        value = Math.Max(1, value - 1);
-        value |= value >> 1; value |= value >> 2; value |= value >> 4; value |= value >> 8; value |= value >> 16;
-        return value + 1;
-    }
-
-    private static void CopyTextureIntoAtlas(uint[] source, int sourceWidth, int sourceHeight, uint[] atlas, int atlasWidth, int atlasHeight, int destX, int destY)
-    {
-        if (source.Length != sourceWidth * sourceHeight)
-            return;
-
-        for (int y = 0; y < sourceHeight; y++)
-        {
-            int atlasRow = (destY + y) * atlasWidth;
-            int sourceRow = y * sourceWidth;
-            Array.Copy(source, sourceRow, atlas, atlasRow + destX, sourceWidth);
-        }
-
-        for (int x = 0; x < sourceWidth; x++)
-        {
-            atlas[Math.Clamp(destY - 1, 0, atlasHeight - 1) * atlasWidth + destX + x] = source[x];
-            atlas[Math.Clamp(destY + sourceHeight, 0, atlasHeight - 1) * atlasWidth + destX + x] = source[(sourceHeight - 1) * sourceWidth + x];
-        }
-
-        for (int y = -1; y <= sourceHeight; y++)
-        {
-            int sourceY = Math.Clamp(y, 0, sourceHeight - 1);
-            int atlasY = Math.Clamp(destY + y, 0, atlasHeight - 1);
-            atlas[atlasY * atlasWidth + Math.Clamp(destX - 1, 0, atlasWidth - 1)] = source[sourceY * sourceWidth];
-            atlas[atlasY * atlasWidth + Math.Clamp(destX + sourceWidth, 0, atlasWidth - 1)] = source[sourceY * sourceWidth + sourceWidth - 1];
-        }
-    }
+        TexturePlacements = new Dictionary<TextureMap, RasterTexturePlacement>(),
+        Uploads = Array.Empty<RasterTextureUpload>(),
+        Width = 1,
+        Height = 1,
+        TextureCount = 0,
+        UsesGpuTextureSampling = false,
+        FallbackReason = reason
+    };
 
     private static RasterTexturePlacement TexturePlacement(IReadOnlyDictionary<TextureMap, RasterTexturePlacement> texturePlacements, TextureMap? texture)
     {
@@ -1069,21 +1331,13 @@ public static class VulkanRasterRenderer
 
 layout(location = 0) in vec3 Position;
 layout(location = 1) in vec3 Normal;
-layout(location = 2) in vec4 ColorAlpha;
-layout(location = 3) in vec4 UvTexture;
-layout(location = 4) in vec4 AtlasTransform;
-layout(location = 5) in vec4 TextureAddress;
-layout(location = 6) in vec4 TextureTransform;
-layout(location = 7) in vec4 Emission;
+layout(location = 2) in vec2 Uv;
+layout(location = 3) in float MaterialIndex;
 
 layout(location = 0) out vec3 fsWorldPos;
 layout(location = 1) out vec3 fsNormal;
-layout(location = 2) out vec4 fsColorAlpha;
-layout(location = 3) out vec4 fsUvTexture;
-layout(location = 4) out vec4 fsAtlasTransform;
-layout(location = 5) out vec4 fsTextureAddress;
-layout(location = 6) out vec4 fsTextureTransform;
-layout(location = 7) out vec4 fsEmission;
+layout(location = 2) out vec2 fsUv;
+layout(location = 3) flat out int fsMaterialIndex;
 
 layout(std140, set = 0, binding = 0) uniform CameraConstants
 {
@@ -1109,28 +1363,17 @@ void main()
     float z = vz;
     float ndcDepth = (z - nearPlane) / (farPlane - nearPlane);
 
-    // Hardware perspective projection. Keep w proportional to camera-space
-    // depth so Vulkan performs correct clipping, depth interpolation, and
-    // perspective-correct interpolation of normals/UVs/colors.
     gl_Position = vec4(
         -vx / (aspect * tanHalfFov),
          vy / tanHalfFov,
          ndcDepth * z,
          z);
-
-    // Vulkan's framebuffer clip-space Y is inverted relative to the CPU raster
-    // screen convention. Flip here instead of pre-dividing by z or relying on
-    // a backend viewport workaround.
     gl_Position.y = -gl_Position.y;
 
     fsWorldPos = Position;
     fsNormal = Normal;
-    fsColorAlpha = ColorAlpha;
-    fsUvTexture = UvTexture;
-    fsAtlasTransform = AtlasTransform;
-    fsTextureAddress = TextureAddress;
-    fsTextureTransform = TextureTransform;
-    fsEmission = Emission;
+    fsUv = Uv;
+    fsMaterialIndex = int(MaterialIndex + 0.5);
 }
 ";
 
@@ -1149,16 +1392,16 @@ struct RasterMaterial
 {
     vec4 ColorAlpha;
     vec4 Emission;
+    vec4 AtlasTransform;
+    vec4 TextureAddress;
+    vec4 TextureTransform;
+    vec4 TextureInfo;
 };
 
 layout(location = 0) in vec3 fsWorldPos;
 layout(location = 1) in vec3 fsNormal;
-layout(location = 2) in vec4 fsColorAlpha;
-layout(location = 3) in vec4 fsUvTexture;
-layout(location = 4) in vec4 fsAtlasTransform;
-layout(location = 5) in vec4 fsTextureAddress;
-layout(location = 6) in vec4 fsTextureTransform;
-layout(location = 7) in vec4 fsEmission;
+layout(location = 2) in vec2 fsUv;
+layout(location = 3) flat in int fsMaterialIndex;
 
 layout(location = 0) out vec4 outColor;
 
@@ -1200,9 +1443,9 @@ float addressTexture(float v, float mode)
     return fract(v);
 }
 
-vec2 addressUv(vec2 uv, vec4 textureAddress)
+vec2 addressUv(vec2 uv, vec4 textureAddress, vec4 textureTransform)
 {
-    vec2 transformed = uv * fsTextureTransform.zw;
+    vec2 transformed = uv * textureTransform.zw;
     float rotation = textureAddress.z;
     if (abs(rotation) > 0.000001)
     {
@@ -1210,13 +1453,13 @@ vec2 addressUv(vec2 uv, vec4 textureAddress)
         float s = sin(rotation);
         transformed = vec2(transformed.x * c - transformed.y * s, transformed.x * s + transformed.y * c);
     }
-    transformed += fsTextureTransform.xy;
+    transformed += textureTransform.xy;
     return vec2(addressTexture(transformed.x, textureAddress.x), addressTexture(transformed.y, textureAddress.y));
 }
 
-vec4 sampleAtlasTexture(vec2 uv, vec4 atlasTransform, vec4 textureAddress)
+vec4 sampleAtlasTexture(vec2 uv, vec4 atlasTransform, vec4 textureAddress, vec4 textureTransform)
 {
-    vec2 addressed = addressUv(uv, textureAddress);
+    vec2 addressed = addressUv(uv, textureAddress, textureTransform);
     float u = addressed.x;
     float v = addressed.y;
     vec2 atlasUv = atlasTransform.xy + vec2(u, v) * atlasTransform.zw;
@@ -1225,34 +1468,30 @@ vec4 sampleAtlasTexture(vec2 uv, vec4 atlasTransform, vec4 textureAddress)
 
 void main()
 {
-    vec4 materialColorAlpha = fsColorAlpha;
-    vec4 materialEmission = fsEmission;
-    int materialCount = max(0, int(Camera.Counts.w + 0.5));
     int debugMode = int(Camera.Counts.z + 0.5);
-    int primitiveId = gl_PrimitiveID;
-    if (primitiveId >= 0 && primitiveId < materialCount)
-    {
-        materialColorAlpha = Materials[primitiveId].ColorAlpha;
-        materialEmission = Materials[primitiveId].Emission;
-    }
-
-    vec4 texel = fsUvTexture.w > 0.5 ? sampleAtlasTexture(fsUvTexture.xy, fsAtlasTransform, fsTextureAddress) : vec4(1.0);
+    RasterMaterial material = Materials[fsMaterialIndex];
+    vec4 materialColorAlpha = material.ColorAlpha;
+    vec4 materialEmission = material.Emission;
+    bool hasTexture = material.TextureInfo.x > 0.5;
+    vec4 texel = hasTexture
+        ? sampleAtlasTexture(fsUv, material.AtlasTransform, material.TextureAddress, material.TextureTransform)
+        : vec4(1.0);
     if (debugMode == 1)
     {
-        vec2 uv = addressUv(fsUvTexture.xy, fsTextureAddress);
+        vec2 uv = addressUv(fsUv, material.TextureAddress, material.TextureTransform);
         outColor = vec4(uv.x, uv.y, 0.0, 1.0);
         return;
     }
     if (debugMode == 2)
     {
-        vec2 uv = addressUv(fsUvTexture.xy, fsTextureAddress);
-        vec2 atlasUv = fsAtlasTransform.xy + uv * fsAtlasTransform.zw;
-        outColor = vec4(fract(atlasUv.x * 8.0), fract(atlasUv.y * 8.0), fsUvTexture.w > 0.5 ? 1.0 : 0.0, 1.0);
+        vec2 uv = addressUv(fsUv, material.TextureAddress, material.TextureTransform);
+        vec2 atlasUv = material.AtlasTransform.xy + uv * material.AtlasTransform.zw;
+        outColor = vec4(fract(atlasUv.x * 8.0), fract(atlasUv.y * 8.0), hasTexture ? 1.0 : 0.0, 1.0);
         return;
     }
     if (debugMode == 3)
     {
-        outColor = fsUvTexture.w > 0.5 ? vec4(texel.rgb, 1.0) : vec4(materialColorAlpha.rgb, 1.0);
+        outColor = hasTexture ? vec4(texel.rgb, 1.0) : vec4(materialColorAlpha.rgb, 1.0);
         return;
     }
     if (debugMode == 4)

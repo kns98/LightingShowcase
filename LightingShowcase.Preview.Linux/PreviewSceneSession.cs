@@ -40,6 +40,18 @@ internal sealed class PreviewSceneSession : IDisposable
         renderGate.Wait(cancellationToken);
         try
         {
+            int previousTriangleCount = scene?.Triangles.Count ?? 0;
+            VulkanSceneComputeRenderer.ReleasePreparedScene();
+            VulkanRasterRenderer.ReleasePreparedScene();
+            scene = null;
+            rasterCache = null;
+
+            // Large scene snapshots and shadow maps occupy the large-object
+            // heap. Reclaim them before importing the replacement so the two
+            // models do not overlap at peak memory.
+            if (previousTriangleCount >= 250_000)
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+
             EnsurePluginsLoaded();
             TextureMap.ConfigureAssetRoots([assetDirectory]);
 
@@ -84,66 +96,95 @@ internal sealed class PreviewSceneSession : IDisposable
         renderGate.Wait(cancellationToken);
         try
         {
+            // Keep only the active scene-sized Vulkan cache. Large models can
+            // otherwise occupy memory twice after switching between Vulkan
+            // raster and Vulkan compute.
+            switch (renderer)
+            {
+                case PreviewRendererKind.VulkanRaster:
+                    VulkanSceneComputeRenderer.ReleasePreparedScene();
+                    break;
+                case PreviewRendererKind.VulkanCompute:
+                    VulkanRasterRenderer.ReleasePreparedScene();
+                    break;
+                default:
+                    VulkanSceneComputeRenderer.ReleasePreparedScene();
+                    VulkanRasterRenderer.ReleasePreparedScene();
+                    break;
+            }
+
             Stopwatch stopwatch = Stopwatch.StartNew();
             string details = string.Empty;
-            RenderImage image = renderer switch
+            RenderImage image;
+            try
             {
-                PreviewRendererKind.Raster => ShadowRasterRenderer.Render(
-                    activeCache,
-                    camera.Position,
-                    camera.ToBasis(),
-                    width,
-                    height,
-                    cancellationToken,
-                    out details,
-                    interactiveFast: interactive),
+                image = renderer switch
+                {
+                    PreviewRendererKind.Raster => ShadowRasterRenderer.Render(
+                        activeCache,
+                        camera.Position,
+                        camera.ToBasis(),
+                        width,
+                        height,
+                        cancellationToken,
+                        out details,
+                        interactiveFast: interactive),
 
-                PreviewRendererKind.VulkanRaster => VulkanRasterRenderer.Render(
-                    activeScene,
-                    camera.Position,
-                    camera.ToBasis(),
-                    width,
-                    height,
-                    cancellationToken,
-                    out details),
+                    PreviewRendererKind.VulkanRaster => VulkanRasterRenderer.Render(
+                        activeScene,
+                        camera.Position,
+                        camera.ToBasis(),
+                        width,
+                        height,
+                        cancellationToken,
+                        out details),
 
-                PreviewRendererKind.VulkanCompute => VulkanSceneComputeRenderer.Render(
-                    activeScene,
-                    camera.Position,
-                    camera.ToBasis(),
-                    width,
-                    height,
-                    bounceCount: 0,
-                    sampleIndex: 0,
-                    sampleCount: 1,
-                    cancellationToken: cancellationToken,
-                    details: out details,
-                    progressCallback: null,
-                    settings: new RenderSettings
-                    {
-                        Width = width,
-                        Height = height,
-                        Backend = RenderBackend.VulkanGpu,
-                        PathBounceCount = 0,
-                        Exposure = 1.0,
-                        AmbientStrength = 1.0,
-                        UseShadows = true
-                    },
-                    fieldOfViewDegrees: camera.FieldOfViewDegrees),
+                    PreviewRendererKind.VulkanCompute => VulkanSceneComputeRenderer.Render(
+                        activeScene,
+                        camera.Position,
+                        camera.ToBasis(),
+                        width,
+                        height,
+                        bounceCount: 0,
+                        sampleIndex: 0,
+                        sampleCount: 1,
+                        cancellationToken: cancellationToken,
+                        details: out details,
+                        progressCallback: null,
+                        settings: new RenderSettings
+                        {
+                            Width = width,
+                            Height = height,
+                            Backend = RenderBackend.VulkanGpu,
+                            PathBounceCount = 0,
+                            Exposure = 1.0,
+                            AmbientStrength = 1.0,
+                            UseShadows = true
+                        },
+                        fieldOfViewDegrees: camera.FieldOfViewDegrees),
 
-                PreviewRendererKind.Cpu => CpuPreviewRenderer.Render(
-                    activeScene,
-                    camera,
-                    width,
-                    height,
-                    samples: 1,
-                    bounces: 1,
-                    exposure: 1.0,
-                    cancellationToken: cancellationToken,
-                    details: out details),
+                    PreviewRendererKind.Cpu => CpuPreviewRenderer.Render(
+                        activeScene,
+                        camera,
+                        width,
+                        height,
+                        samples: 1,
+                        bounces: 1,
+                        exposure: 1.0,
+                        cancellationToken: cancellationToken,
+                        details: out details),
 
-                _ => throw new ArgumentOutOfRangeException(nameof(renderer), renderer, "Unknown preview renderer.")
-            };
+                    _ => throw new ArgumentOutOfRangeException(nameof(renderer), renderer, "Unknown preview renderer.")
+                };
+            }
+            catch (OutOfMemoryException ex) when (renderer is PreviewRendererKind.VulkanRaster or PreviewRendererKind.VulkanCompute)
+            {
+                VulkanSceneComputeRenderer.ReleasePreparedScene();
+                VulkanRasterRenderer.ReleasePreparedScene();
+                throw new InvalidOperationException(
+                    "Vulkan could not reserve enough memory for this scene. The scene cache was released; try Vulkan raster, lower the memory budget, or simplify the model.",
+                    ex);
+            }
 
             stopwatch.Stop();
             return new PreviewFrame(image, stopwatch.Elapsed.TotalMilliseconds, details);
