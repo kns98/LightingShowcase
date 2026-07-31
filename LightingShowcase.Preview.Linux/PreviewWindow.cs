@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -44,7 +43,10 @@ internal sealed class PreviewWindow : Window
     private bool rendering;
     private bool renderAgain;
     private bool pendingInteractive;
-    private CancellationTokenSource lifetimeCancellation = new();
+    private long renderVersion;
+    private CancellationTokenSource? activeRenderCancellation;
+    private CancellationTokenSource? resizeDebounceCancellation;
+    private readonly CancellationTokenSource lifetimeCancellation = new();
 
     public PreviewWindow(string[] startupArguments)
     {
@@ -79,8 +81,10 @@ internal sealed class PreviewWindow : Window
         status = new TextBlock
         {
             Text = "Open a scene/model file or pass one on the command line.",
-            Margin = new Thickness(10, 7),
-            TextWrapping = TextWrapping.Wrap
+            Margin = new Thickness(10, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
         image = new Image
         {
@@ -116,11 +120,20 @@ internal sealed class PreviewWindow : Window
         Grid.SetRow(rendererHint, 1);
         Grid.SetColumnSpan(rendererHint, 4);
 
+        Border statusBar = new()
+        {
+            Height = 36,
+            MinHeight = 36,
+            MaxHeight = 36,
+            ClipToBounds = true,
+            Child = status
+        };
+
         DockPanel root = new();
         DockPanel.SetDock(toolbarGrid, Dock.Top);
-        DockPanel.SetDock(status, Dock.Bottom);
+        DockPanel.SetDock(statusBar, Dock.Bottom);
         root.Children.Add(toolbarGrid);
-        root.Children.Add(status);
+        root.Children.Add(statusBar);
         root.Children.Add(viewport);
         Content = root;
 
@@ -145,6 +158,7 @@ internal sealed class PreviewWindow : Window
         viewport.PointerCaptureLost += (_, _) => dragging = false;
         viewport.PointerWheelChanged += OnPointerWheelChanged;
         viewport.KeyDown += OnViewportKeyDown;
+        viewport.SizeChanged += (_, _) => ScheduleResizeRender();
 
         Opened += async (_, _) =>
         {
@@ -155,6 +169,8 @@ internal sealed class PreviewWindow : Window
         Closed += (_, _) =>
         {
             lifetimeCancellation.Cancel();
+            activeRenderCancellation?.Cancel();
+            resizeDebounceCancellation?.Cancel();
             bitmap?.Dispose();
             session.Dispose();
             lifetimeCancellation.Dispose();
@@ -209,6 +225,7 @@ internal sealed class PreviewWindow : Window
             return;
         }
 
+        CancelCurrentRender();
         SetBusy(true, $"Loading {Path.GetFileName(path)} …");
         try
         {
@@ -337,6 +354,16 @@ internal sealed class PreviewWindow : Window
             return;
 
         pendingInteractive = interactive;
+        renderVersion++;
+
+        // Do not cancel an in-flight interactive frame for every pointer move.
+        // Pointer events arrive faster than most renderers can finish, and
+        // cancelling each frame can starve live orbit so nothing is displayed.
+        // A non-interactive request (mouse release, reset, resize, renderer
+        // change) supersedes the preview and may cancel it immediately.
+        if (!interactive)
+            activeRenderCancellation?.Cancel();
+
         if (rendering)
         {
             renderAgain = true;
@@ -351,7 +378,20 @@ internal sealed class PreviewWindow : Window
                 renderAgain = false;
                 bool thisInteractive = pendingInteractive;
                 pendingInteractive = false;
-                await RenderOneFrameAsync(thisInteractive);
+                long thisVersion = renderVersion;
+
+                using CancellationTokenSource frameCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(lifetimeCancellation.Token);
+                activeRenderCancellation = frameCancellation;
+                try
+                {
+                    await RenderOneFrameAsync(thisInteractive, thisVersion, frameCancellation.Token);
+                }
+                finally
+                {
+                    if (ReferenceEquals(activeRenderCancellation, frameCancellation))
+                        activeRenderCancellation = null;
+                }
             }
             while (renderAgain && !lifetimeCancellation.IsCancellationRequested);
         }
@@ -361,24 +401,35 @@ internal sealed class PreviewWindow : Window
         }
     }
 
-    private async Task RenderOneFrameAsync(bool interactive)
+    private async Task RenderOneFrameAsync(bool interactive, long requestVersion, CancellationToken token)
     {
         RendererChoice renderer = SelectedRenderer;
         (int width, int height) = ChooseRenderSize(renderer.Kind, interactive);
         CameraDefinition camera = session.Camera.Snapshot();
-        status.Text = $"Rendering {renderer.Label} at {width}x{height} …";
+        RenderOptions.SetBitmapInterpolationMode(
+            image,
+            interactive ? BitmapInterpolationMode.LowQuality : BitmapInterpolationMode.HighQuality);
+        if (!interactive)
+            status.Text = $"Rendering {renderer.Label} at {width}x{height} …";
 
         try
         {
-            CancellationToken token = lifetimeCancellation.Token;
             PreviewFrame frame = await Task.Run(
                 () => session.Render(renderer.Kind, camera, width, height, interactive, token),
                 token);
 
-            if (lifetimeCancellation.IsCancellationRequested)
+            // While dragging, publishing one slightly older completed frame is
+            // preferable to starving the display. The queued render immediately
+            // follows with the latest camera snapshot. Final-quality requests
+            // still reject superseded results.
+            if (token.IsCancellationRequested || (!interactive && requestVersion != renderVersion))
                 return;
 
-            lastFrameTimes[renderer.Kind] = frame.ElapsedMilliseconds;
+            if (lastFrameTimes.TryGetValue(renderer.Kind, out double previousMilliseconds))
+                lastFrameTimes[renderer.Kind] = previousMilliseconds * 0.70 + frame.ElapsedMilliseconds * 0.30;
+            else
+                lastFrameTimes[renderer.Kind] = frame.ElapsedMilliseconds;
+
             ShowImage(frame.Image);
 
             bool live = CanRenderContinuously(renderer.Kind);
@@ -391,19 +442,21 @@ internal sealed class PreviewWindow : Window
             };
             status.Text = $"{renderer.Label}: {frame.ElapsedMilliseconds:0} ms — {interactionMessage}. {frame.Details}";
         }
-        catch (OperationCanceledException) when (lifetimeCancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
         }
         catch (Exception ex)
         {
-            status.Text = $"{renderer.Label} failed: {ex.Message}";
+            if (requestVersion == renderVersion && !lifetimeCancellation.IsCancellationRequested)
+                status.Text = $"{renderer.Label} failed: {ex.Message}";
         }
     }
 
     private (int Width, int Height) ChooseRenderSize(PreviewRendererKind renderer, bool interactive)
     {
-        double viewWidth = Math.Max(320.0, viewport.Bounds.Width);
-        double viewHeight = Math.Max(180.0, viewport.Bounds.Height);
+        double renderScaling = Math.Clamp(RenderScaling, 1.0, 4.0);
+        double viewWidth = Math.Max(320.0, viewport.Bounds.Width * renderScaling);
+        double viewHeight = Math.Max(180.0, viewport.Bounds.Height * renderScaling);
 
         int maxWidth = renderer switch
         {
@@ -424,37 +477,90 @@ internal sealed class PreviewWindow : Window
 
         double scale = Math.Min(maxWidth / viewWidth, maxHeight / viewHeight);
         scale = Math.Min(1.0, scale);
-        int width = Math.Max(160, (int)Math.Round(viewWidth * scale));
-        int height = Math.Max(90, (int)Math.Round(viewHeight * scale));
+        int width = AlignToEight(Math.Max(160, (int)Math.Round(viewWidth * scale)));
+        int height = AlignToEight(Math.Max(96, (int)Math.Round(viewHeight * scale)));
         return (width, height);
     }
 
-    private void ShowImage(RenderImage rendered)
+    private unsafe void ShowImage(RenderImage rendered)
     {
-        WriteableBitmap next = new(
-            new PixelSize(rendered.Width, rendered.Height),
-            new Vector(96, 96),
-            PixelFormats.Rgba8888,
-            AlphaFormat.Unpremul);
+        bool sizeChanged = bitmap == null ||
+            bitmap.PixelSize.Width != rendered.Width ||
+            bitmap.PixelSize.Height != rendered.Height;
 
-        byte[] source = new byte[checked(rendered.PackedRgba32.Length * sizeof(uint))];
-        Buffer.BlockCopy(rendered.PackedRgba32, 0, source, 0, source.Length);
-
-        using (ILockedFramebuffer framebuffer = next.Lock())
+        // Reuse the Avalonia bitmap at a stable render size. This avoids one
+        // native bitmap allocation and one managed full-frame copy per frame.
+        if (sizeChanged)
         {
-            int sourceRowBytes = rendered.Width * 4;
-            for (int y = 0; y < rendered.Height; y++)
+            WriteableBitmap next = new(
+                new PixelSize(rendered.Width, rendered.Height),
+                new Vector(96, 96),
+                PixelFormats.Rgba8888,
+                AlphaFormat.Unpremul);
+
+            WriteableBitmap? old = bitmap;
+            bitmap = next;
+            image.Source = next;
+            old?.Dispose();
+        }
+
+        WriteableBitmap target = bitmap!;
+        using (ILockedFramebuffer framebuffer = target.Lock())
+        {
+            fixed (uint* sourceBase = rendered.PackedRgba32)
             {
-                IntPtr destination = IntPtr.Add(framebuffer.Address, y * framebuffer.RowBytes);
-                Marshal.Copy(source, y * sourceRowBytes, destination, sourceRowBytes);
+                long sourceRowBytes = checked((long)rendered.Width * sizeof(uint));
+                for (int y = 0; y < rendered.Height; y++)
+                {
+                    byte* source = (byte*)(sourceBase + y * rendered.Width);
+                    byte* destination = (byte*)framebuffer.Address + y * framebuffer.RowBytes;
+                    Buffer.MemoryCopy(source, destination, framebuffer.RowBytes, sourceRowBytes);
+                }
             }
         }
 
-        WriteableBitmap? old = bitmap;
-        bitmap = next;
-        image.Source = next;
-        old?.Dispose();
+        // The bitmap object is intentionally reused, so explicitly invalidate
+        // the Image after the framebuffer unlocks to present the new pixels.
+        image.InvalidateVisual();
     }
+
+    private void ScheduleResizeRender()
+    {
+        if (session.TriangleCount == 0 || lifetimeCancellation.IsCancellationRequested)
+            return;
+
+        resizeDebounceCancellation?.Cancel();
+        CancellationTokenSource cancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(lifetimeCancellation.Token);
+        resizeDebounceCancellation = cancellation;
+        _ = RenderAfterResizeDelayAsync(cancellation);
+    }
+
+    private async Task RenderAfterResizeDelayAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(140, cancellation.Token);
+            await RequestRenderAsync(interactive: false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            if (ReferenceEquals(resizeDebounceCancellation, cancellation))
+                resizeDebounceCancellation = null;
+            cancellation.Dispose();
+        }
+    }
+
+    private void CancelCurrentRender()
+    {
+        renderVersion++;
+        activeRenderCancellation?.Cancel();
+    }
+
+    private static int AlignToEight(int value) => Math.Max(8, (value + 7) & ~7);
 
     private void SetBusy(bool busy, string? message = null)
     {

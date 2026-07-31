@@ -60,7 +60,12 @@ public static class VulkanRasterRenderer
     private static GraphicsDevice? sharedGraphicsDevice;
     private static SharedRasterResources? sharedRasterResources;
     private static PreparedRasterScene? preparedScene;
-    private static RasterTargets? sharedTargets;
+    // Interactive and settled frames use different resolutions. Keep a small
+    // LRU so orbit/release does not recreate color, depth, staging and sync
+    // resources every time the viewer switches between those sizes.
+    private const int MaxCachedTargetSizes = 3;
+    private static readonly Dictionary<(int Width, int Height), RasterTargets> sharedTargets = new();
+    private static long targetUseSerial;
     private static bool preflightCompleted;
 
     private sealed class SharedRasterResources : IDisposable
@@ -127,6 +132,7 @@ public static class VulkanRasterRenderer
         public required Framebuffer Framebuffer { get; init; }
         public required CommandList CommandList { get; init; }
         public required Fence Fence { get; init; }
+        public long LastUseSerial { get; set; }
 
         public void Dispose()
         {
@@ -302,15 +308,18 @@ public static class VulkanRasterRenderer
                 sharedRasterResources = null;
                 PreparedRasterScene? sceneResources = preparedScene;
                 preparedScene = null;
-                RasterTargets? targets = sharedTargets;
-                sharedTargets = null;
+                RasterTargets[] targets = sharedTargets.Values.ToArray();
+                sharedTargets.Clear();
 
                 if (device != null)
                 {
                     try { Stage("Dispose shared Vulkan raster GraphicsDevice: WaitForIdle"); device.WaitForIdle(); } catch { }
                 }
 
-                try { targets?.Dispose(); } catch { }
+                foreach (RasterTargets target in targets)
+                {
+                    try { target.Dispose(); } catch { }
+                }
                 try { sceneResources?.Dispose(); } catch { }
                 try { resources?.Dispose(); } catch { }
                 if (device != null)
@@ -458,15 +467,41 @@ public static class VulkanRasterRenderer
 
     private static RasterTargets GetOrCreateTargets(GraphicsDevice gd, int width, int height)
     {
-        if (sharedTargets != null && sharedTargets.Width == width && sharedTargets.Height == height)
-            return sharedTargets;
-        sharedTargets?.Dispose();
+        (int Width, int Height) key = (width, height);
+        if (sharedTargets.TryGetValue(key, out RasterTargets? cached))
+        {
+            cached.LastUseSerial = ++targetUseSerial;
+            return cached;
+        }
+
+        if (sharedTargets.Count >= MaxCachedTargetSizes)
+        {
+            KeyValuePair<(int Width, int Height), RasterTargets> oldest =
+                sharedTargets.MinBy(pair => pair.Value.LastUseSerial);
+            sharedTargets.Remove(oldest.Key);
+            oldest.Value.Dispose();
+            Stage($"Evict Vulkan raster target cache: {oldest.Key.Width}x{oldest.Key.Height}");
+        }
+
         ResourceFactory factory = gd.ResourceFactory;
         Texture color = factory.CreateTexture(TextureDescription.Texture2D((uint)width, (uint)height, 1, 1, Veldrid.PixelFormat.R8_G8_B8_A8_UNorm, TextureUsage.RenderTarget));
         Texture depth = factory.CreateTexture(TextureDescription.Texture2D((uint)width, (uint)height, 1, 1, Veldrid.PixelFormat.D32_Float_S8_UInt, TextureUsage.DepthStencil));
         Texture staging = factory.CreateTexture(TextureDescription.Texture2D((uint)width, (uint)height, 1, 1, Veldrid.PixelFormat.R8_G8_B8_A8_UNorm, TextureUsage.Staging));
-        sharedTargets = new RasterTargets { Width=width, Height=height, ColorTexture=color, DepthTexture=depth, StagingTexture=staging, Framebuffer=factory.CreateFramebuffer(new FramebufferDescription(depth, color)), CommandList=factory.CreateCommandList(), Fence=factory.CreateFence(false) };
-        return sharedTargets;
+        RasterTargets created = new()
+        {
+            Width = width,
+            Height = height,
+            ColorTexture = color,
+            DepthTexture = depth,
+            StagingTexture = staging,
+            Framebuffer = factory.CreateFramebuffer(new FramebufferDescription(depth, color)),
+            CommandList = factory.CreateCommandList(),
+            Fence = factory.CreateFence(false),
+            LastUseSerial = ++targetUseSerial
+        };
+        sharedTargets.Add(key, created);
+        Stage($"Cache Vulkan raster targets: {width}x{height} ({sharedTargets.Count}/{MaxCachedTargetSizes})");
+        return created;
     }
 
     private static void ComputeSceneBounds(Scene scene, out Vec3 center, out double radius)
