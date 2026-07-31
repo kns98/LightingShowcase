@@ -252,6 +252,9 @@ public static class GltfSceneIO
                 List<Vec3> positions = ReadVec3Accessor(root, buffers, posEl.GetInt32(), world)
                     .Select(NormalizePosition)
                     .ToList();
+                List<Vec3> normals = attributes.TryGetProperty("NORMAL", out JsonElement normalAccessorEl)
+                    ? ReadNormalAccessor(root, buffers, normalAccessorEl.GetInt32(), world)
+                    : new List<Vec3>();
                 int materialIndex = primitive.TryGetProperty("material", out JsonElement materialEl) ? materialEl.GetInt32() : -1;
                 GltfMaterial? gltfMaterial = materialIndex >= 0 && materialIndex < materials.Count ? materials[materialIndex] : null;
                 string uvAttributeName = $"TEXCOORD_{Math.Max(0, gltfMaterial?.BaseColorTexCoord ?? 0)}";
@@ -283,9 +286,25 @@ public static class GltfSceneIO
                     if (ia < vertexColors.Count && ib < vertexColors.Count && ic < vertexColors.Count)
                     {
                         Vec3 averageVertexColor = (vertexColors[ia] + vertexColors[ib] + vertexColors[ic]) / 3.0;
-                        triangleMaterial = new Material(material.Color.Multiply(averageVertexColor), material.Emission, material.LightId, material.Texture, material.EmissionColor, material.EmissiveTexture, material.Alpha, material.AlphaBlend, material.Metallic, material.Roughness, material.Transmission, material.MetallicRoughnessTexture, material.NormalTexture);
+                        triangleMaterial = new Material(
+                            material.Color.Multiply(averageVertexColor), material.Emission, material.LightId, material.Texture,
+                            material.EmissionColor, material.EmissiveTexture, material.Alpha, material.AlphaBlend,
+                            material.Metallic, material.Roughness, material.Transmission, material.MetallicRoughnessTexture,
+                            material.NormalTexture, material.OcclusionTexture, material.NormalScale, material.OcclusionStrength,
+                            material.AlphaMode, material.AlphaCutoff, material.DoubleSided);
                     }
-                    scene.AddTriangle(positions[ia], positions[ib], positions[ic], uva, uvb, uvc, triangleMaterial);
+                    if (ia < normals.Count && ib < normals.Count && ic < normals.Count)
+                    {
+                        scene.AddTriangle(
+                            positions[ia], positions[ib], positions[ic],
+                            uva, uvb, uvc,
+                            normals[ia], normals[ib], normals[ic],
+                            triangleMaterial);
+                    }
+                    else
+                    {
+                        scene.AddTriangle(positions[ia], positions[ib], positions[ic], uva, uvb, uvc, triangleMaterial);
+                    }
                     if (triangleMaterial.Emission > 0.0 && triangleMaterial.EmissiveTexture != null)
                     {
                         Vec3 centroid = (positions[ia] + positions[ib] + positions[ic]) / 3.0;
@@ -575,17 +594,32 @@ public static class GltfSceneIO
             Vec3 emissionColor = new(1.0, 1.0, 1.0);
             double alpha = 1.0;
             bool alphaBlend = false;
-            double metallic = 0.0;
-            double roughness = 0.72;
+            MaterialAlphaMode alphaMode = MaterialAlphaMode.Opaque;
+            double alphaCutoff = 0.5;
+            bool doubleSided = false;
+            double metallic = 1.0;
+            double roughness = 1.0;
             double transmission = 0.0;
             TextureMap? texture = null;
             TextureMap? emissiveTexture = null;
             TextureMap? metallicRoughnessTexture = null;
             TextureMap? normalTexture = null;
+            TextureMap? occlusionTexture = null;
+            double normalScale = 1.0;
+            double occlusionStrength = 1.0;
             int baseColorTexCoord = 0;
             JsonElement mat = materials[i];
-            string alphaMode = mat.TryGetProperty("alphaMode", out JsonElement alphaModeEl) ? alphaModeEl.GetString() ?? "OPAQUE" : "OPAQUE";
-            alphaBlend = alphaMode.Equals("BLEND", StringComparison.OrdinalIgnoreCase) || alphaMode.Equals("MASK", StringComparison.OrdinalIgnoreCase);
+            string alphaModeName = mat.TryGetProperty("alphaMode", out JsonElement alphaModeEl) ? alphaModeEl.GetString() ?? "OPAQUE" : "OPAQUE";
+            alphaMode = alphaModeName.ToUpperInvariant() switch
+            {
+                "MASK" => MaterialAlphaMode.Mask,
+                "BLEND" => MaterialAlphaMode.Blend,
+                _ => MaterialAlphaMode.Opaque
+            };
+            alphaBlend = alphaMode == MaterialAlphaMode.Blend;
+            if (mat.TryGetProperty("alphaCutoff", out JsonElement alphaCutoffEl))
+                alphaCutoff = alphaCutoffEl.GetDouble();
+            doubleSided = mat.TryGetProperty("doubleSided", out JsonElement doubleSidedEl) && doubleSidedEl.GetBoolean();
             if (mat.TryGetProperty("pbrMetallicRoughness", out JsonElement pbr))
             {
                 if (pbr.TryGetProperty("baseColorFactor", out JsonElement baseColor) && baseColor.GetArrayLength() >= 3)
@@ -594,7 +628,6 @@ public static class GltfSceneIO
                     if (baseColor.GetArrayLength() >= 4)
                     {
                         alpha = baseColor[3].GetDouble();
-                        alphaBlend |= alpha < 0.999;
                     }
                 }
 
@@ -654,14 +687,6 @@ public static class GltfSceneIO
                 }
                 emissiveTexture = ApplyTextureTransform(emissiveTexture, emissiveTextureEl);
 
-                // glTF emissiveTexture is a separate atlas/mask.  A texture with no
-                // emissiveFactor still needs a non-zero strength to be visible in
-                // this renderer, so default to white emission for that case.
-                if (emissiveTexture != null && emission <= 0.0)
-                {
-                    emission = 1.0;
-                    emissionColor = new Vec3(1.0, 1.0, 1.0);
-                }
             }
 
             if (mat.TryGetProperty("normalTexture", out JsonElement normalTextureEl) &&
@@ -674,6 +699,22 @@ public static class GltfSceneIO
                     textureCache[textureIndex] = normalTexture;
                 }
                 normalTexture = ApplyTextureTransform(normalTexture, normalTextureEl);
+                if (normalTextureEl.TryGetProperty("scale", out JsonElement normalScaleEl))
+                    normalScale = normalScaleEl.GetDouble();
+            }
+
+            if (mat.TryGetProperty("occlusionTexture", out JsonElement occlusionTextureEl) &&
+                occlusionTextureEl.TryGetProperty("index", out JsonElement occlusionTextureIndexEl))
+            {
+                int textureIndex = occlusionTextureIndexEl.GetInt32();
+                if (!textureCache.TryGetValue(textureIndex, out occlusionTexture))
+                {
+                    occlusionTexture = TryReadTexture(root, buffers, sceneFilePath, textureIndex);
+                    textureCache[textureIndex] = occlusionTexture;
+                }
+                occlusionTexture = ApplyTextureTransform(occlusionTexture, occlusionTextureEl);
+                if (occlusionTextureEl.TryGetProperty("strength", out JsonElement occlusionStrengthEl))
+                    occlusionStrength = occlusionStrengthEl.GetDouble();
             }
 
             if (mat.TryGetProperty("extensions", out JsonElement matExt))
@@ -682,17 +723,20 @@ public static class GltfSceneIO
                     transmissionExt.TryGetProperty("transmissionFactor", out JsonElement transmissionEl))
                 {
                     transmission = transmissionEl.GetDouble();
-                    alphaBlend |= transmission > 0.001;
                 }
                 if (matExt.TryGetProperty("KHR_materials_ior", out JsonElement iorExt) &&
                     iorExt.TryGetProperty("ior", out JsonElement _))
                 {
-                    // The current renderer uses a practical transmission blend rather than refraction.
-                    alphaBlend |= transmission > 0.001;
+                    // The current renderer uses a practical transmission approximation rather than refraction.
                 }
             }
 
-            result.Add(new GltfMaterial(new Material(color, emission, texture: texture, emissionColor: emissionColor, emissiveTexture: emissiveTexture, alpha: alpha, alphaBlend: alphaBlend, metallic: metallic, roughness: roughness, transmission: transmission, metallicRoughnessTexture: metallicRoughnessTexture, normalTexture: normalTexture), baseColorTexCoord));
+            result.Add(new GltfMaterial(new Material(
+                color, emission, texture: texture, emissionColor: emissionColor, emissiveTexture: emissiveTexture,
+                alpha: alphaMode == MaterialAlphaMode.Opaque ? 1.0 : alpha, alphaBlend: alphaBlend, metallic: metallic, roughness: roughness, transmission: transmission,
+                metallicRoughnessTexture: metallicRoughnessTexture, normalTexture: normalTexture, occlusionTexture: occlusionTexture,
+                normalScale: normalScale, occlusionStrength: occlusionStrength, alphaMode: alphaMode,
+                alphaCutoff: alphaCutoff, doubleSided: doubleSided), baseColorTexCoord));
         }
         return result;
     }
@@ -889,6 +933,32 @@ public static class GltfSceneIO
         return values;
     }
 
+    private static List<Vec3> ReadNormalAccessor(JsonElement root, List<byte[]> buffers, int accessorIndex, Matrix4x4 transform)
+    {
+        AccessorInfo info = GetAccessorInfo(root, accessorIndex);
+        if (info.Type != "VEC3")
+            throw new NotSupportedException($"Expected VEC3 glTF normals, got {info.Type}.");
+
+        if (!Matrix4x4.Invert(transform, out Matrix4x4 inverse))
+            inverse = Matrix4x4.Identity;
+        Matrix4x4 normalTransform = Matrix4x4.Transpose(inverse);
+
+        int componentSize = ComponentByteSize(info.ComponentType);
+        List<Vec3> values = new(info.Count);
+        for (int i = 0; i < info.Count; i++)
+        {
+            int offset = info.Offset + i * info.Stride;
+            float x = (float)ReadAccessorComponent(buffers[info.Buffer], offset, info.ComponentType, normalized: true);
+            float y = (float)ReadAccessorComponent(buffers[info.Buffer], offset + componentSize, info.ComponentType, normalized: true);
+            float z = (float)ReadAccessorComponent(buffers[info.Buffer], offset + componentSize * 2, info.ComponentType, normalized: true);
+            Vector3 transformed = Vector3.TransformNormal(new Vector3(x, y, z), normalTransform);
+            if (transformed.LengthSquared() > 1e-20f)
+                transformed = Vector3.Normalize(transformed);
+            values.Add(new Vec3(transformed.X, transformed.Y, transformed.Z));
+        }
+        return values;
+    }
+
     private static List<Vec2> ReadVec2Accessor(JsonElement root, List<byte[]> buffers, int accessorIndex)
     {
         AccessorInfo info = GetAccessorInfo(root, accessorIndex);
@@ -1020,7 +1090,7 @@ public static class GltfSceneIO
     {
         return componentType switch
         {
-            5120 => normalized ? Math.Max(-1.0, data[offset] / 127.0) : (sbyte)data[offset],
+            5120 => normalized ? Math.Max(-1.0, (sbyte)data[offset] / 127.0) : (sbyte)data[offset],
             5121 => normalized ? data[offset] / 255.0 : data[offset],
             5122 => normalized ? Math.Max(-1.0, BitConverter.ToInt16(data, offset) / 32767.0) : BitConverter.ToInt16(data, offset),
             5123 => normalized ? BitConverter.ToUInt16(data, offset) / 65535.0 : BitConverter.ToUInt16(data, offset),

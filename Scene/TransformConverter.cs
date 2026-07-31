@@ -44,6 +44,16 @@ public static class TransformConverter
         return pivot + position + q;
     }
 
+    /// <summary>Transforms a normal by the inverse-transpose of an SRT transform.</summary>
+    public static Vec3 ApplySrtNormal(Vec3 normal, Vec3 rotation, Vec3 scale)
+    {
+        Vec3 safeScale = SanitizeScale(scale);
+        Vec3 transformed = new(normal.X / safeScale.X, normal.Y / safeScale.Y, normal.Z / safeScale.Z);
+        transformed = RotateEuler(transformed, rotation);
+        double length = transformed.Length();
+        return double.IsFinite(length) && length > 1e-12 ? transformed / length : normal.Normalize();
+    }
+
     public static Vec3 FromRightHandedZForwardToCanonical(Vec3 value) => new(value.X, value.Y, value.Z);
     public static Vec3 FromZUpToCanonicalYUp(Vec3 value) => new(value.X, value.Z, -value.Y);
     public static Vec3 MirrorX(Vec3 value) => new(-value.X, value.Y, value.Z);

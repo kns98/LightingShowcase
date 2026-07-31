@@ -11,6 +11,13 @@ using LightingShowcase.Math3D;
 
 namespace LightingShowcase.SceneGraph;
 
+public enum MaterialAlphaMode
+{
+    Opaque = 0,
+    Mask = 1,
+    Blend = 2
+}
+
 /// <summary>Surface material definition used by shading and texture lookup.</summary>
 public sealed class Material
 {
@@ -27,6 +34,12 @@ public sealed class Material
     public double Transmission { get; }
     public TextureMap? MetallicRoughnessTexture { get; }
     public TextureMap? NormalTexture { get; }
+    public TextureMap? OcclusionTexture { get; }
+    public double NormalScale { get; }
+    public double OcclusionStrength { get; }
+    public MaterialAlphaMode AlphaMode { get; }
+    public double AlphaCutoff { get; }
+    public bool DoubleSided { get; }
 
     /// <summary>Constructs and initializes this component.</summary>
     public Material(
@@ -42,7 +55,13 @@ public sealed class Material
         double roughness = 0.72,
         double transmission = 0.0,
         TextureMap? metallicRoughnessTexture = null,
-        TextureMap? normalTexture = null)
+        TextureMap? normalTexture = null,
+        TextureMap? occlusionTexture = null,
+        double normalScale = 1.0,
+        double occlusionStrength = 1.0,
+        MaterialAlphaMode alphaMode = MaterialAlphaMode.Opaque,
+        double alphaCutoff = 0.5,
+        bool doubleSided = false)
     {
         Color = color;
         Emission = emission;
@@ -51,12 +70,20 @@ public sealed class Material
         EmissionColor = emissionColor ?? new Vec3(1.0, 1.0, 1.0);
         EmissiveTexture = emissiveTexture;
         Alpha = Math.Clamp(alpha, 0.0, 1.0);
-        AlphaBlend = alphaBlend || Alpha < 0.999 || transmission > 0.0;
+        AlphaMode = alphaMode == MaterialAlphaMode.Opaque && (alphaBlend || Alpha < 0.999)
+            ? MaterialAlphaMode.Blend
+            : alphaMode;
+        AlphaBlend = AlphaMode == MaterialAlphaMode.Blend || transmission > 0.0;
+        AlphaCutoff = Math.Clamp(alphaCutoff, 0.0, 1.0);
+        DoubleSided = doubleSided;
         Metallic = Math.Clamp(metallic, 0.0, 1.0);
         Roughness = Math.Clamp(roughness, 0.02, 1.0);
         Transmission = Math.Clamp(transmission, 0.0, 1.0);
         MetallicRoughnessTexture = metallicRoughnessTexture;
         NormalTexture = normalTexture;
+        OcclusionTexture = occlusionTexture;
+        NormalScale = double.IsFinite(normalScale) ? Math.Clamp(normalScale, -8.0, 8.0) : 1.0;
+        OcclusionStrength = double.IsFinite(occlusionStrength) ? Math.Clamp(occlusionStrength, 0.0, 1.0) : 1.0;
     }
 
     /// <summary>Samples the base color/albedo texture.</summary>
@@ -113,6 +140,10 @@ public sealed class Material
     /// <summary>Returns a copy with a different base texture while preserving emission data.</summary>
     public Material WithTexture(TextureMap? texture)
     {
-        return new Material(Color, Emission, LightId, texture, EmissionColor, EmissiveTexture, Alpha, AlphaBlend, Metallic, Roughness, Transmission, MetallicRoughnessTexture, NormalTexture);
+        return new Material(
+            Color, Emission, LightId, texture, EmissionColor, EmissiveTexture,
+            Alpha, AlphaBlend, Metallic, Roughness, Transmission,
+            MetallicRoughnessTexture, NormalTexture, OcclusionTexture,
+            NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided);
     }
 }

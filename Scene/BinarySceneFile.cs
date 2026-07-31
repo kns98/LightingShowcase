@@ -19,7 +19,7 @@ namespace LightingShowcase.SceneGraph;
 public static class BinarySceneFile
 {
     private const string Magic = "LSCN";
-    private const int Version = 7;
+    private const int Version = 8;
 
     private enum GeometryKind : byte
     {
@@ -350,7 +350,7 @@ public static class BinarySceneFile
             case GeometryKind.Mesh:
             {
                 if (version >= 3)
-                    ReadIndexedMesh(reader, group, materialTable);
+                    ReadIndexedMesh(reader, group, materialTable, version);
                 else
                 {
                     int triangleCount = reader.ReadInt32();
@@ -364,7 +364,7 @@ public static class BinarySceneFile
         }
     }
 
-    private readonly record struct MeshVertex(Vec3 Position, Vec2 Uv);
+    private readonly record struct MeshVertex(Vec3 Position, Vec2 Uv, Vec3 Normal);
 
     private static void WriteIndexedMesh(BinaryWriter writer, IReadOnlyList<Triangle> triangles, MaterialWriteTable materialTable)
     {
@@ -374,9 +374,9 @@ public static class BinarySceneFile
 
         foreach (Triangle triangle in triangles)
         {
-            int a = AddMeshVertex(vertices, indexByVertex, triangle.A, triangle.UvA);
-            int b = AddMeshVertex(vertices, indexByVertex, triangle.B, triangle.UvB);
-            int c = AddMeshVertex(vertices, indexByVertex, triangle.C, triangle.UvC);
+            int a = AddMeshVertex(vertices, indexByVertex, triangle.A, triangle.UvA, triangle.NormalA);
+            int b = AddMeshVertex(vertices, indexByVertex, triangle.B, triangle.UvB, triangle.NormalB);
+            int c = AddMeshVertex(vertices, indexByVertex, triangle.C, triangle.UvC, triangle.NormalC);
             faces.Add((a, b, c, materialTable.IdFor(triangle.Material)));
         }
 
@@ -385,6 +385,7 @@ public static class BinarySceneFile
         {
             WriteVec3Single(writer, vertex.Position);
             WriteVec2Single(writer, vertex.Uv);
+            WriteVec3Single(writer, vertex.Normal);
         }
 
         writer.Write(faces.Count);
@@ -397,12 +398,17 @@ public static class BinarySceneFile
         }
     }
 
-    private static void ReadIndexedMesh(BinaryReader reader, SceneObjectGroup group, MaterialReadTable? materialTable)
+    private static void ReadIndexedMesh(BinaryReader reader, SceneObjectGroup group, MaterialReadTable? materialTable, int version)
     {
         int vertexCount = reader.ReadInt32();
         MeshVertex[] vertices = new MeshVertex[Math.Max(0, vertexCount)];
         for (int i = 0; i < vertices.Length; i++)
-            vertices[i] = new MeshVertex(ReadVec3Single(reader), ReadVec2Single(reader));
+        {
+            Vec3 position = ReadVec3Single(reader);
+            Vec2 uv = ReadVec2Single(reader);
+            Vec3 normal = version >= 8 ? ReadVec3Single(reader) : Vec3.Zero;
+            vertices[i] = new MeshVertex(position, uv, normal);
+        }
 
         int faceCount = reader.ReadInt32();
         for (int i = 0; i < faceCount; i++)
@@ -418,24 +424,28 @@ public static class BinarySceneFile
             MeshVertex a = vertices[ia];
             MeshVertex b = vertices[ib];
             MeshVertex c = vertices[ic];
-            group.AddTriangle(a.Position, b.Position, c.Position, a.Uv, b.Uv, c.Uv, material);
+            if (version >= 8)
+                group.AddTriangle(a.Position, b.Position, c.Position, a.Uv, b.Uv, c.Uv, a.Normal, b.Normal, c.Normal, material);
+            else
+                group.AddTriangle(a.Position, b.Position, c.Position, a.Uv, b.Uv, c.Uv, material);
         }
     }
 
-    private static int AddMeshVertex(List<MeshVertex> vertices, Dictionary<string, int> indexByVertex, Vec3 position, Vec2 uv)
+    private static int AddMeshVertex(List<MeshVertex> vertices, Dictionary<string, int> indexByVertex, Vec3 position, Vec2 uv, Vec3 normal)
     {
-        string key = MeshVertexKey(position, uv);
+        string key = MeshVertexKey(position, uv, normal);
         if (indexByVertex.TryGetValue(key, out int index))
             return index;
 
         index = vertices.Count;
-        vertices.Add(new MeshVertex(position, uv));
+        vertices.Add(new MeshVertex(position, uv, normal));
         indexByVertex[key] = index;
         return index;
     }
 
-    private static string MeshVertexKey(Vec3 position, Vec2 uv) =>
-        $"{RoundKey(position.X)}|{RoundKey(position.Y)}|{RoundKey(position.Z)}|{RoundKey(uv.U)}|{RoundKey(uv.V)}";
+    private static string MeshVertexKey(Vec3 position, Vec2 uv, Vec3 normal) =>
+        $"{RoundKey(position.X)}|{RoundKey(position.Y)}|{RoundKey(position.Z)}|{RoundKey(uv.U)}|{RoundKey(uv.V)}|" +
+        $"{RoundKey(normal.X)}|{RoundKey(normal.Y)}|{RoundKey(normal.Z)}";
 
     private static string RoundKey(double value) => Math.Round(value, 6).ToString("G17", System.Globalization.CultureInfo.InvariantCulture);
 
@@ -530,6 +540,14 @@ public static class BinarySceneFile
         writer.Write(material.Transmission);
         writer.Write(textureTable.IdFor(material.MetallicRoughnessTexture));
         writer.Write(textureTable.IdFor(material.NormalTexture));
+
+        // Version 8 preserves the remaining core glTF material controls.
+        writer.Write(textureTable.IdFor(material.OcclusionTexture));
+        writer.Write(material.NormalScale);
+        writer.Write(material.OcclusionStrength);
+        writer.Write((byte)material.AlphaMode);
+        writer.Write(material.AlphaCutoff);
+        writer.Write(material.DoubleSided);
     }
 
     private static Material ReadMaterial(BinaryReader reader, string sceneFilePath, int version, TextureReadTable? textureTable)
@@ -553,6 +571,14 @@ public static class BinarySceneFile
         double transmission = reader.ReadDouble();
         TextureMap? metallicRoughnessTexture = textureTable?.ById(reader.ReadInt32());
         TextureMap? normalTexture = textureTable?.ById(reader.ReadInt32());
+        TextureMap? occlusionTexture = version >= 8 ? textureTable?.ById(reader.ReadInt32()) : null;
+        double normalScale = version >= 8 ? reader.ReadDouble() : 1.0;
+        double occlusionStrength = version >= 8 ? reader.ReadDouble() : 1.0;
+        MaterialAlphaMode alphaMode = version >= 8
+            ? (MaterialAlphaMode)reader.ReadByte()
+            : alphaBlend ? MaterialAlphaMode.Blend : MaterialAlphaMode.Opaque;
+        double alphaCutoff = version >= 8 ? reader.ReadDouble() : 0.5;
+        bool doubleSided = version >= 8 && reader.ReadBoolean();
 
         return new Material(
             color,
@@ -567,7 +593,13 @@ public static class BinarySceneFile
             roughness,
             transmission,
             metallicRoughnessTexture,
-            normalTexture);
+            normalTexture,
+            occlusionTexture,
+            normalScale,
+            occlusionStrength,
+            alphaMode,
+            alphaCutoff,
+            doubleSided);
     }
 
     private static void WriteTextureTable(BinaryWriter writer, TextureWriteTable textureTable)
@@ -747,7 +779,9 @@ public static class BinarySceneFile
             $"{RoundKey(material.Color.X)}|{RoundKey(material.Color.Y)}|{RoundKey(material.Color.Z)}|{RoundKey(material.Emission)}|{material.LightId ?? string.Empty}|" +
             $"{textureTable.IdFor(material.Texture)}|{RoundKey(material.EmissionColor.X)}|{RoundKey(material.EmissionColor.Y)}|{RoundKey(material.EmissionColor.Z)}|" +
             $"{textureTable.IdFor(material.EmissiveTexture)}|{RoundKey(material.Alpha)}|{material.AlphaBlend}|{RoundKey(material.Metallic)}|{RoundKey(material.Roughness)}|" +
-            $"{RoundKey(material.Transmission)}|{textureTable.IdFor(material.MetallicRoughnessTexture)}|{textureTable.IdFor(material.NormalTexture)}";
+            $"{RoundKey(material.Transmission)}|{textureTable.IdFor(material.MetallicRoughnessTexture)}|{textureTable.IdFor(material.NormalTexture)}|" +
+            $"{textureTable.IdFor(material.OcclusionTexture)}|{RoundKey(material.NormalScale)}|{RoundKey(material.OcclusionStrength)}|" +
+            $"{(int)material.AlphaMode}|{RoundKey(material.AlphaCutoff)}|{material.DoubleSided}";
     }
 
     private sealed class MaterialReadTable
@@ -811,6 +845,7 @@ public static class BinarySceneFile
             IdFor(material.EmissiveTexture);
             IdFor(material.MetallicRoughnessTexture);
             IdFor(material.NormalTexture);
+            IdFor(material.OcclusionTexture);
         }
 
         private static string KeyFor(TextureMap texture)
@@ -1040,9 +1075,33 @@ public static class BinarySceneFile
     private static bool SameMaterial(Material a, Material b) =>
         SameVec(a.Color, b.Color) &&
         NearlyEqual(a.Emission, b.Emission) &&
+        SameVec(a.EmissionColor, b.EmissionColor) &&
+        NearlyEqual(a.Alpha, b.Alpha) &&
+        a.AlphaMode == b.AlphaMode &&
+        NearlyEqual(a.AlphaCutoff, b.AlphaCutoff) &&
+        a.DoubleSided == b.DoubleSided &&
+        NearlyEqual(a.Metallic, b.Metallic) &&
+        NearlyEqual(a.Roughness, b.Roughness) &&
+        NearlyEqual(a.Transmission, b.Transmission) &&
+        NearlyEqual(a.NormalScale, b.NormalScale) &&
+        NearlyEqual(a.OcclusionStrength, b.OcclusionStrength) &&
         string.Equals(a.LightId ?? string.Empty, b.LightId ?? string.Empty, StringComparison.Ordinal) &&
-        string.Equals(a.Texture?.Name ?? string.Empty, b.Texture?.Name ?? string.Empty, StringComparison.Ordinal) &&
-        string.Equals(a.Texture?.SourcePath ?? string.Empty, b.Texture?.SourcePath ?? string.Empty, StringComparison.Ordinal);
+        SameTexture(a.Texture, b.Texture) &&
+        SameTexture(a.EmissiveTexture, b.EmissiveTexture) &&
+        SameTexture(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture) &&
+        SameTexture(a.NormalTexture, b.NormalTexture) &&
+        SameTexture(a.OcclusionTexture, b.OcclusionTexture);
+
+    private static bool SameTexture(TextureMap? a, TextureMap? b) =>
+        string.Equals(a?.Name ?? string.Empty, b?.Name ?? string.Empty, StringComparison.Ordinal) &&
+        string.Equals(a?.SourcePath ?? string.Empty, b?.SourcePath ?? string.Empty, StringComparison.Ordinal) &&
+        (a?.WrapU ?? TextureAddressMode.Repeat) == (b?.WrapU ?? TextureAddressMode.Repeat) &&
+        (a?.WrapV ?? TextureAddressMode.Repeat) == (b?.WrapV ?? TextureAddressMode.Repeat) &&
+        NearlyEqual(a?.OffsetU ?? 0.0, b?.OffsetU ?? 0.0) &&
+        NearlyEqual(a?.OffsetV ?? 0.0, b?.OffsetV ?? 0.0) &&
+        NearlyEqual(a?.ScaleU ?? 1.0, b?.ScaleU ?? 1.0) &&
+        NearlyEqual(a?.ScaleV ?? 1.0, b?.ScaleV ?? 1.0) &&
+        NearlyEqual(a?.Rotation ?? 0.0, b?.Rotation ?? 0.0);
 
     private static bool SameVec(Vec3 a, Vec3 b) => SamePoint(a, b);
     private static bool SamePoint(Vec3 a, Vec3 b) => NearlyEqual(a.X, b.X) && NearlyEqual(a.Y, b.Y) && NearlyEqual(a.Z, b.Z);

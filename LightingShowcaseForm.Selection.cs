@@ -619,7 +619,13 @@ public sealed partial class LightingShowcaseForm
             presetMaterial.Roughness,
             presetMaterial.Transmission,
             panel.MaterialUseMetallicRoughnessTextureBox.Checked ? material.MetallicRoughnessTexture : null,
-            panel.MaterialUseNormalTextureBox.Checked ? material.NormalTexture : null));
+            panel.MaterialUseNormalTextureBox.Checked ? material.NormalTexture : null,
+            material.OcclusionTexture,
+            material.NormalScale,
+            material.OcclusionStrength,
+            presetMaterial.AlphaMode,
+            presetMaterial.AlphaCutoff,
+            material.DoubleSided));
 
         scene.RebuildWorldGeometry();
         MarkRenderDirty();
@@ -667,7 +673,13 @@ public sealed partial class LightingShowcaseForm
             roughness,
             transmission,
             keepMetallicRoughnessTexture ? material.MetallicRoughnessTexture : null,
-            keepNormalTexture ? material.NormalTexture : null));
+            keepNormalTexture ? material.NormalTexture : null,
+            material.OcclusionTexture,
+            material.NormalScale,
+            material.OcclusionStrength,
+            alphaBlend ? MaterialAlphaMode.Blend : material.AlphaMode == MaterialAlphaMode.Mask ? MaterialAlphaMode.Mask : MaterialAlphaMode.Opaque,
+            material.AlphaCutoff,
+            material.DoubleSided));
 
         scene.RebuildWorldGeometry();
         MarkRenderDirty();

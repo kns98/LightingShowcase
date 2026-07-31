@@ -179,6 +179,27 @@ Large-scene Vulkan memory behavior:
 - Vulkan raster keeps only one framebuffer target size cached to minimize color, depth, and readback allocations.
 - Hardware/API limits still apply, including Vulkan's per-buffer size and maximum texture-dimension constraints.
 
+### Linux Vulkan glTF PBR rendering
+
+The Linux **Vulkan raster** backend now follows the glTF 2.0 metallic-roughness material workflow for imported glTF/GLB assets:
+
+- Base-color and emissive texture samples are decoded from sRGB before lighting. Metallic-roughness, normal, and occlusion maps remain linear data.
+- The shader samples glTF roughness from the green channel and metallic from the blue channel, then evaluates a GGX/Smith/Schlick microfacet BRDF.
+- Imported vertex normals are retained and transformed with the inverse-transpose normal matrix. Normal maps use a derivative-generated tangent frame, avoiding a larger per-vertex tangent buffer.
+- Occlusion affects indirect lighting, emissive textures are multiplied by the glTF emissive factor, and `OPAQUE`/`MASK` alpha rules are honored.
+- A memory-light procedural studio environment supplies diffuse and specular reflections, followed by Khronos PBR Neutral tone mapping and sRGB output encoding.
+
+Material-channel diagnostics can be selected before launching the preview:
+
+```bash
+LIGHTINGSHOWCASE_VULKAN_RASTER_DEBUG=metallic \
+  dotnet run --project ./LightingShowcase.Preview.Linux/LightingShowcase.Preview.Linux.csproj -- /path/to/DamagedHelmet.glb
+```
+
+Supported diagnostic names are `uv`, `atlas`, `texture`, `material`, `normal`, `metallic`, `roughness`, `occlusion`, `emissive`, `direct`, and `ibl`. The default mode is the final PBR render.
+
+Current limitations: the procedural studio environment is built into the shader rather than loaded from an HDR file, and fully sorted glTF `BLEND` rendering is not yet implemented. `OPAQUE` and `MASK` assets, including the Khronos DamagedHelmet sample, use the corrected PBR path.
+
 On minimal Ubuntu or WSL installations, install the common Avalonia/X11 libraries:
 
 ```bash

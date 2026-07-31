@@ -51,6 +51,13 @@ public static class VulkanRasterRenderer
                 "atlas" => 2,
                 "texture" => 3,
                 "material" => 4,
+                "normal" => 5,
+                "metallic" => 6,
+                "roughness" => 7,
+                "occlusion" => 8,
+                "emissive" => 9,
+                "direct" => 10,
+                "ibl" => 11,
                 _ => 0
             };
         }
@@ -254,22 +261,75 @@ public static class VulkanRasterRenderer
     [StructLayout(LayoutKind.Sequential)]
     private readonly struct RasterMaterial
     {
-        public readonly Vector4 ColorAlpha;
-        public readonly Vector4 Emission;
-        public readonly Vector4 AtlasTransform;
-        public readonly Vector4 TextureAddress;
-        public readonly Vector4 TextureTransform;
-        public readonly Vector4 TextureInfo; // x=has base texture
+        public readonly Vector4 BaseColorAlpha;
+        public readonly Vector4 EmissiveFactor;
+        public readonly Vector4 PbrFactors;      // x=metallic, y=roughness, z=normal scale, w=occlusion strength
+        public readonly Vector4 AlphaFlags;      // x=alpha mode, y=cutoff, z=double sided, w=transmission
+        public readonly Vector4 TextureFlags;    // base, metallic-roughness, normal, emissive
+        public readonly Vector4 TextureFlags2;   // x=occlusion
 
-        public RasterMaterial(Material material, RasterTexturePlacement texturePlacement)
+        public readonly Vector4 BaseAtlasTransform;
+        public readonly Vector4 BaseTextureAddress;
+        public readonly Vector4 BaseTextureTransform;
+
+        public readonly Vector4 MrAtlasTransform;
+        public readonly Vector4 MrTextureAddress;
+        public readonly Vector4 MrTextureTransform;
+
+        public readonly Vector4 NormalAtlasTransform;
+        public readonly Vector4 NormalTextureAddress;
+        public readonly Vector4 NormalTextureTransform;
+
+        public readonly Vector4 EmissiveAtlasTransform;
+        public readonly Vector4 EmissiveTextureAddress;
+        public readonly Vector4 EmissiveTextureTransform;
+
+        public readonly Vector4 OcclusionAtlasTransform;
+        public readonly Vector4 OcclusionTextureAddress;
+        public readonly Vector4 OcclusionTextureTransform;
+
+        public RasterMaterial(
+            Material material,
+            RasterTexturePlacement basePlacement,
+            RasterTexturePlacement mrPlacement,
+            RasterTexturePlacement normalPlacement,
+            RasterTexturePlacement emissivePlacement,
+            RasterTexturePlacement occlusionPlacement)
         {
-            bool hasTexture = texturePlacement.HasTexture;
-            ColorAlpha = MaterialColorAlpha(material);
-            Emission = MaterialEmission(material);
-            AtlasTransform = texturePlacement.AtlasTransform;
-            TextureAddress = texturePlacement.TextureAddress;
-            TextureTransform = texturePlacement.TextureTransform;
-            TextureInfo = new Vector4(hasTexture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+            BaseColorAlpha = MaterialColorAlpha(material);
+            EmissiveFactor = MaterialEmission(material);
+            PbrFactors = new Vector4(
+                (float)material.Metallic,
+                (float)material.Roughness,
+                (float)material.NormalScale,
+                (float)material.OcclusionStrength);
+            AlphaFlags = new Vector4(
+                (float)(int)material.AlphaMode,
+                (float)material.AlphaCutoff,
+                material.DoubleSided ? 1.0f : 0.0f,
+                (float)material.Transmission);
+            TextureFlags = new Vector4(
+                basePlacement.HasTexture ? 1.0f : 0.0f,
+                mrPlacement.HasTexture ? 1.0f : 0.0f,
+                normalPlacement.HasTexture ? 1.0f : 0.0f,
+                emissivePlacement.HasTexture ? 1.0f : 0.0f);
+            TextureFlags2 = new Vector4(occlusionPlacement.HasTexture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+
+            BaseAtlasTransform = basePlacement.AtlasTransform;
+            BaseTextureAddress = basePlacement.TextureAddress;
+            BaseTextureTransform = basePlacement.TextureTransform;
+            MrAtlasTransform = mrPlacement.AtlasTransform;
+            MrTextureAddress = mrPlacement.TextureAddress;
+            MrTextureTransform = mrPlacement.TextureTransform;
+            NormalAtlasTransform = normalPlacement.AtlasTransform;
+            NormalTextureAddress = normalPlacement.TextureAddress;
+            NormalTextureTransform = normalPlacement.TextureTransform;
+            EmissiveAtlasTransform = emissivePlacement.AtlasTransform;
+            EmissiveTextureAddress = emissivePlacement.TextureAddress;
+            EmissiveTextureTransform = emissivePlacement.TextureTransform;
+            OcclusionAtlasTransform = occlusionPlacement.AtlasTransform;
+            OcclusionTextureAddress = occlusionPlacement.TextureAddress;
+            OcclusionTextureTransform = occlusionPlacement.TextureTransform;
         }
     }
 
@@ -427,7 +487,7 @@ public static class VulkanRasterRenderer
         CommandList commandList = targets.CommandList;
         commandList.Begin();
         commandList.SetFramebuffer(targets.Framebuffer);
-        commandList.ClearColorTarget(0, new RgbaFloat(0.010f, 0.012f, 0.016f, 1.0f));
+        commandList.ClearColorTarget(0, new RgbaFloat(0.035f, 0.040f, 0.050f, 1.0f));
         commandList.ClearDepthStencil(1.0f);
         if (prepared.OpaqueVertexCount > 0)
         {
@@ -469,7 +529,7 @@ public static class VulkanRasterRenderer
         string triangleMode = prepared.NearClippedTriangleCount > 0
             ? $"triangles={prepared.TotalTriangleCount}/{prepared.SourceTriangleCount} ({prepared.NearClippedTriangleCount} invalid skipped)"
             : $"triangles={prepared.TotalTriangleCount}";
-        details = $"VULKAN RASTER CACHED - {width}x{height}, {triangleMode}, lights={prepared.LightCount}, {textureMode}, cache={(prepareMs == 0 ? "hot" : "ready")}, device={deviceMs}ms, targets={targetMs}ms, prepare={prepareMs}ms, uniform={uniformMs}ms, record={recordMs}ms, gpu+wait={gpuWaitMs}ms, readback={readbackMs}ms, total={total.ElapsedMilliseconds}ms";
+        details = $"VULKAN RASTER PBR CACHED - {width}x{height}, {triangleMode}, lights={prepared.LightCount}, {textureMode}, cache={(prepareMs == 0 ? "hot" : "ready")}, device={deviceMs}ms, targets={targetMs}ms, prepare={prepareMs}ms, uniform={uniformMs}ms, record={recordMs}ms, gpu+wait={gpuWaitMs}ms, readback={readbackMs}ms, total={total.ElapsedMilliseconds}ms";
         Stage(details);
         return image;
     }
@@ -596,11 +656,10 @@ public static class VulkanRasterRenderer
                 continue;
 
             int materialIndex = materialIds[triangle.Material];
-            Vec3 normal = triangle.Normal.Normalize();
             int vertexIndex = trianglesInChunk * 3;
-            vertices[vertexIndex] = new RasterVertex(triangle.A, normal, triangle.UvA, materialIndex);
-            vertices[vertexIndex + 1] = new RasterVertex(triangle.B, normal, triangle.UvB, materialIndex);
-            vertices[vertexIndex + 2] = new RasterVertex(triangle.C, normal, triangle.UvC, materialIndex);
+            vertices[vertexIndex] = new RasterVertex(triangle.A, triangle.NormalA, triangle.UvA, materialIndex);
+            vertices[vertexIndex + 1] = new RasterVertex(triangle.B, triangle.NormalB, triangle.UvB, materialIndex);
+            vertices[vertexIndex + 2] = new RasterVertex(triangle.C, triangle.NormalC, triangle.UvC, materialIndex);
             trianglesInChunk++;
 
             if (trianglesInChunk == TrianglesPerChunk)
@@ -941,11 +1000,24 @@ public static class VulkanRasterRenderer
             renderableTriangleCount++;
             if (!materialIds.ContainsKey(triangle.Material))
             {
-                RasterTexturePlacement placement = useGpuTextureSampling
+                RasterTexturePlacement basePlacement = useGpuTextureSampling
                     ? TexturePlacement(texturePlacements, triangle.Material.Texture)
                     : RasterTexturePlacement.None;
+                RasterTexturePlacement mrPlacement = useGpuTextureSampling
+                    ? TexturePlacement(texturePlacements, triangle.Material.MetallicRoughnessTexture)
+                    : RasterTexturePlacement.None;
+                RasterTexturePlacement normalPlacement = useGpuTextureSampling
+                    ? TexturePlacement(texturePlacements, triangle.Material.NormalTexture)
+                    : RasterTexturePlacement.None;
+                RasterTexturePlacement emissivePlacement = useGpuTextureSampling
+                    ? TexturePlacement(texturePlacements, triangle.Material.EmissiveTexture)
+                    : RasterTexturePlacement.None;
+                RasterTexturePlacement occlusionPlacement = useGpuTextureSampling
+                    ? TexturePlacement(texturePlacements, triangle.Material.OcclusionTexture)
+                    : RasterTexturePlacement.None;
                 materialIds.Add(triangle.Material, materials.Count);
-                materials.Add(new RasterMaterial(triangle.Material, placement));
+                materials.Add(new RasterMaterial(
+                    triangle.Material, basePlacement, mrPlacement, normalPlacement, emissivePlacement, occlusionPlacement));
             }
         }
 
@@ -1098,7 +1170,15 @@ public static class VulkanRasterRenderer
         HashSet<TextureMap> seen = new();
         foreach (Triangle triangle in scene.Triangles)
         {
-            TextureMap? texture = triangle.Material.Texture;
+            AddTexture(triangle.Material.Texture);
+            AddTexture(triangle.Material.MetallicRoughnessTexture);
+            AddTexture(triangle.Material.NormalTexture);
+            AddTexture(triangle.Material.EmissiveTexture);
+            AddTexture(triangle.Material.OcclusionTexture);
+        }
+
+        void AddTexture(TextureMap? texture)
+        {
             if (texture != null && seen.Add(texture))
                 textures.Add(texture);
         }
@@ -1320,6 +1400,13 @@ public static class VulkanRasterRenderer
         2 => "atlas",
         3 => "texture",
         4 => "material",
+        5 => "normal",
+        6 => "metallic",
+        7 => "roughness",
+        8 => "occlusion",
+        9 => "emissive",
+        10 => "direct",
+        11 => "ibl",
         _ => "off"
     };
 
@@ -1380,6 +1467,8 @@ void main()
     private const string FragmentShaderSource = @"
 #version 450
 
+const float PI = 3.14159265358979323846;
+
 struct RasterLight
 {
     vec4 PositionKind;
@@ -1390,12 +1479,32 @@ struct RasterLight
 
 struct RasterMaterial
 {
-    vec4 ColorAlpha;
-    vec4 Emission;
-    vec4 AtlasTransform;
-    vec4 TextureAddress;
-    vec4 TextureTransform;
-    vec4 TextureInfo;
+    vec4 BaseColorAlpha;
+    vec4 EmissiveFactor;
+    vec4 PbrFactors;
+    vec4 AlphaFlags;
+    vec4 TextureFlags;
+    vec4 TextureFlags2;
+
+    vec4 BaseAtlasTransform;
+    vec4 BaseTextureAddress;
+    vec4 BaseTextureTransform;
+
+    vec4 MrAtlasTransform;
+    vec4 MrTextureAddress;
+    vec4 MrTextureTransform;
+
+    vec4 NormalAtlasTransform;
+    vec4 NormalTextureAddress;
+    vec4 NormalTextureTransform;
+
+    vec4 EmissiveAtlasTransform;
+    vec4 EmissiveTextureAddress;
+    vec4 EmissiveTextureTransform;
+
+    vec4 OcclusionAtlasTransform;
+    vec4 OcclusionTextureAddress;
+    vec4 OcclusionTextureTransform;
 };
 
 layout(location = 0) in vec3 fsWorldPos;
@@ -1460,60 +1569,242 @@ vec2 addressUv(vec2 uv, vec4 textureAddress, vec4 textureTransform)
 vec4 sampleAtlasTexture(vec2 uv, vec4 atlasTransform, vec4 textureAddress, vec4 textureTransform)
 {
     vec2 addressed = addressUv(uv, textureAddress, textureTransform);
-    float u = addressed.x;
-    float v = addressed.y;
-    vec2 atlasUv = atlasTransform.xy + vec2(u, v) * atlasTransform.zw;
+    vec2 atlasUv = atlasTransform.xy + addressed * atlasTransform.zw;
     return texture(sampler2D(AtlasTexture, AtlasSampler), atlasUv);
+}
+
+float srgbChannelToLinear(float value)
+{
+    return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+}
+
+vec3 srgbToLinear(vec3 value)
+{
+    return vec3(
+        srgbChannelToLinear(value.r),
+        srgbChannelToLinear(value.g),
+        srgbChannelToLinear(value.b));
+}
+
+float linearChannelToSrgb(float value)
+{
+    value = max(value, 0.0);
+    return value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+vec3 linearToSrgb(vec3 value)
+{
+    return vec3(
+        linearChannelToSrgb(value.r),
+        linearChannelToSrgb(value.g),
+        linearChannelToSrgb(value.b));
+}
+
+vec3 pbrNeutralToneMap(vec3 color)
+{
+    const float startCompression = 0.76;
+    const float desaturation = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression)
+        return max(color, vec3(0.0));
+
+    float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / max(peak, 0.000001);
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return max(mix(color, newPeak * vec3(1.0), g), vec3(0.0));
+}
+
+float distributionGgx(float nDotH, float alphaRoughness)
+{
+    float a2 = alphaRoughness * alphaRoughness;
+    float f = nDotH * nDotH * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * f * f, 0.000001);
+}
+
+float visibilitySmithGgxCorrelated(float nDotV, float nDotL, float alphaRoughness)
+{
+    float a2 = alphaRoughness * alphaRoughness;
+    float gv = nDotL * sqrt(max(nDotV * nDotV * (1.0 - a2) + a2, 0.0));
+    float gl = nDotV * sqrt(max(nDotL * nDotL * (1.0 - a2) + a2, 0.0));
+    return 0.5 / max(gv + gl, 0.000001);
+}
+
+vec3 fresnelSchlick(float vDotH, vec3 f0)
+{
+    float f = pow(1.0 - clamp(vDotH, 0.0, 1.0), 5.0);
+    return f0 + (1.0 - f0) * f;
+}
+
+mat3 cotangentFrame(vec3 normal, vec3 position, vec2 uv)
+{
+    vec3 dp1 = dFdx(position);
+    vec3 dp2 = dFdy(position);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2Perp = cross(dp2, normal);
+    vec3 dp1Perp = cross(normal, dp1);
+    vec3 tangent = dp2Perp * duv1.x + dp1Perp * duv2.x;
+    vec3 bitangent = dp2Perp * duv1.y + dp1Perp * duv2.y;
+    float maxLength = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if (maxLength < 0.00000001)
+    {
+        vec3 axis = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+        tangent = normalize(cross(axis, normal));
+        bitangent = cross(normal, tangent);
+        return mat3(tangent, bitangent, normal);
+    }
+    float inverseLength = inversesqrt(maxLength);
+    return mat3(tangent * inverseLength, bitangent * inverseLength, normal);
+}
+
+vec3 studioEnvironment(vec3 direction)
+{
+    direction = normalize(direction);
+    float skyAmount = smoothstep(-0.25, 0.65, direction.y);
+    vec3 ground = vec3(0.035, 0.040, 0.050);
+    vec3 sky = vec3(0.32, 0.39, 0.49);
+    vec3 radiance = mix(ground, sky, skyAmount);
+
+    vec3 keyDirection = normalize(vec3(-0.55, 0.62, -0.56));
+    vec3 rimDirection = normalize(vec3(0.78, 0.28, 0.56));
+    float key = pow(max(dot(direction, keyDirection), 0.0), 96.0);
+    float rim = pow(max(dot(direction, rimDirection), 0.0), 180.0);
+    radiance += vec3(5.2, 4.8, 4.2) * key;
+    radiance += vec3(2.0, 2.7, 3.8) * rim;
+    return radiance;
+}
+
+vec3 diffuseEnvironment(vec3 normal)
+{
+    float skyAmount = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(vec3(0.055, 0.060, 0.070), vec3(0.42, 0.47, 0.54), skyAmount);
 }
 
 void main()
 {
     int debugMode = int(Camera.Counts.z + 0.5);
     RasterMaterial material = Materials[fsMaterialIndex];
-    vec4 materialColorAlpha = material.ColorAlpha;
-    vec4 materialEmission = material.Emission;
-    bool hasTexture = material.TextureInfo.x > 0.5;
-    vec4 texel = hasTexture
-        ? sampleAtlasTexture(fsUv, material.AtlasTransform, material.TextureAddress, material.TextureTransform)
+
+    bool hasBase = material.TextureFlags.x > 0.5;
+    bool hasMr = material.TextureFlags.y > 0.5;
+    bool hasNormal = material.TextureFlags.z > 0.5;
+    bool hasEmissive = material.TextureFlags.w > 0.5;
+    bool hasOcclusion = material.TextureFlags2.x > 0.5;
+
+    vec4 baseTexel = hasBase
+        ? sampleAtlasTexture(fsUv, material.BaseAtlasTransform, material.BaseTextureAddress, material.BaseTextureTransform)
         : vec4(1.0);
+    vec3 baseColor = material.BaseColorAlpha.rgb * (hasBase ? srgbToLinear(baseTexel.rgb) : vec3(1.0));
+    float alpha = material.BaseColorAlpha.a * baseTexel.a;
+    int alphaMode = int(material.AlphaFlags.x + 0.5);
+    if (alphaMode == 0)
+        alpha = 1.0;
+    else if (alphaMode == 1 && alpha < material.AlphaFlags.y)
+        discard;
+
+    vec4 mrTexel = hasMr
+        ? sampleAtlasTexture(fsUv, material.MrAtlasTransform, material.MrTextureAddress, material.MrTextureTransform)
+        : vec4(1.0);
+    float roughness = clamp(material.PbrFactors.y * (hasMr ? mrTexel.g : 1.0), 0.045, 1.0);
+    float metallic = clamp(material.PbrFactors.x * (hasMr ? mrTexel.b : 1.0), 0.0, 1.0);
+
+    float occlusion = 1.0;
+    if (hasOcclusion)
+    {
+        float sampledOcclusion = sampleAtlasTexture(
+            fsUv, material.OcclusionAtlasTransform, material.OcclusionTextureAddress, material.OcclusionTextureTransform).r;
+        occlusion = mix(1.0, sampledOcclusion, clamp(material.PbrFactors.w, 0.0, 1.0));
+    }
+
+    vec3 viewDir = normalize(Camera.CameraPosition.xyz - fsWorldPos);
+    vec3 normal = normalize(fsNormal);
+    if (material.AlphaFlags.z > 0.5)
+    {
+        if (dot(normal, viewDir) < 0.0)
+            normal = -normal;
+    }
+    else if (dot(normal, viewDir) < 0.0)
+    {
+        normal = -normal;
+    }
+
+    if (hasNormal)
+    {
+        vec2 normalUv = addressUv(fsUv, material.NormalTextureAddress, material.NormalTextureTransform);
+        vec3 tangentNormal = sampleAtlasTexture(
+            fsUv, material.NormalAtlasTransform, material.NormalTextureAddress, material.NormalTextureTransform).xyz * 2.0 - 1.0;
+        tangentNormal.xy *= material.PbrFactors.z;
+        tangentNormal = normalize(tangentNormal);
+        normal = normalize(cotangentFrame(normal, fsWorldPos, normalUv) * tangentNormal);
+    }
+
+    vec3 emissive = vec3(0.0);
+    if (material.EmissiveFactor.a > 0.0)
+    {
+        vec3 emissionSource = hasEmissive
+            ? srgbToLinear(sampleAtlasTexture(
+                fsUv, material.EmissiveAtlasTransform, material.EmissiveTextureAddress, material.EmissiveTextureTransform).rgb)
+            : baseColor;
+        emissive = emissionSource * material.EmissiveFactor.rgb * material.EmissiveFactor.a;
+    }
+
     if (debugMode == 1)
     {
-        vec2 uv = addressUv(fsUv, material.TextureAddress, material.TextureTransform);
+        vec2 uv = addressUv(fsUv, material.BaseTextureAddress, material.BaseTextureTransform);
         outColor = vec4(uv.x, uv.y, 0.0, 1.0);
         return;
     }
     if (debugMode == 2)
     {
-        vec2 uv = addressUv(fsUv, material.TextureAddress, material.TextureTransform);
-        vec2 atlasUv = material.AtlasTransform.xy + uv * material.AtlasTransform.zw;
-        outColor = vec4(fract(atlasUv.x * 8.0), fract(atlasUv.y * 8.0), hasTexture ? 1.0 : 0.0, 1.0);
+        vec2 uv = addressUv(fsUv, material.BaseTextureAddress, material.BaseTextureTransform);
+        vec2 atlasUv = material.BaseAtlasTransform.xy + uv * material.BaseAtlasTransform.zw;
+        outColor = vec4(fract(atlasUv.x * 8.0), fract(atlasUv.y * 8.0), hasBase ? 1.0 : 0.0, 1.0);
         return;
     }
     if (debugMode == 3)
     {
-        outColor = hasTexture ? vec4(texel.rgb, 1.0) : vec4(materialColorAlpha.rgb, 1.0);
+        outColor = vec4(hasBase ? baseTexel.rgb : linearToSrgb(material.BaseColorAlpha.rgb), 1.0);
         return;
     }
     if (debugMode == 4)
     {
-        outColor = vec4(materialColorAlpha.rgb, 1.0);
+        outColor = vec4(linearToSrgb(material.BaseColorAlpha.rgb), 1.0);
+        return;
+    }
+    if (debugMode == 5)
+    {
+        outColor = vec4(normal * 0.5 + 0.5, 1.0);
+        return;
+    }
+    if (debugMode == 6)
+    {
+        outColor = vec4(vec3(metallic), 1.0);
+        return;
+    }
+    if (debugMode == 7)
+    {
+        outColor = vec4(vec3(roughness), 1.0);
+        return;
+    }
+    if (debugMode == 8)
+    {
+        outColor = vec4(vec3(occlusion), 1.0);
+        return;
+    }
+    if (debugMode == 9)
+    {
+        outColor = vec4(linearToSrgb(pbrNeutralToneMap(emissive)), 1.0);
         return;
     }
 
-    vec3 baseColor = materialColorAlpha.rgb * texel.rgb;
-    float alpha = materialColorAlpha.a * texel.a;
-    if (alpha < 0.04)
-        discard;
-
-    vec3 normal = normalize(fsNormal);
-    vec3 viewDir = normalize(Camera.CameraPosition.xyz - fsWorldPos);
-    // Culling is disabled for editor preview, so do not trust winding-dependent
-    // gl_FrontFacing for material lighting. Match the CPU preview's view-facing
-    // normal rule: flip only when the geometric normal faces away from camera.
-    if (dot(normal, viewDir) < 0.0)
-        normal = -normal;
-
-    vec3 linear = baseColor * 0.110;
+    float nDotV = max(dot(normal, viewDir), 0.0001);
+    vec3 f0 = mix(vec3(0.04), baseColor, metallic);
+    vec3 directLighting = vec3(0.0);
     int lightCount = min(32, int(Camera.Counts.x + 0.5));
     for (int i = 0; i < lightCount; i++)
     {
@@ -1522,13 +1813,13 @@ void main()
             continue;
 
         float kind = light.PositionKind.w;
-        vec3 L;
+        vec3 lightDirection;
         float attenuation = 1.0;
         float cone = 1.0;
 
         if (kind > 0.5 && kind < 1.5)
         {
-            L = normalize(-light.DirectionRange.xyz);
+            lightDirection = normalize(-light.DirectionRange.xyz);
         }
         else
         {
@@ -1537,7 +1828,7 @@ void main()
             if (distanceToLight < 0.0001)
                 continue;
 
-            L = toLight / distanceToLight;
+            lightDirection = toLight / distanceToLight;
             float range = light.DirectionRange.w;
             attenuation = 1.0 / (1.0 + 0.11 * distanceToLight * distanceToLight);
             if (range > 0.0001)
@@ -1558,28 +1849,45 @@ void main()
             }
         }
 
-        float ndotl = max(dot(normal, L), 0.0);
-        if (ndotl <= 0.0)
+        float nDotL = max(dot(normal, lightDirection), 0.0);
+        if (nDotL <= 0.0)
             continue;
 
-        float strength = light.ColorIntensity.w * attenuation * cone * 0.18;
-        linear += baseColor * light.ColorIntensity.rgb * (ndotl * strength);
-
-        // Small CPU-raster-style Blinn highlight so spheres and glossy surfaces
-        // read closer to the software preview without adding a full material pass.
-        vec3 H = normalize(L + viewDir);
-        float spec = pow(max(dot(normal, H), 0.0), 16.0) * ndotl * strength * 0.04;
-        linear += light.ColorIntensity.rgb * spec;
+        vec3 halfVector = normalize(lightDirection + viewDir);
+        float nDotH = max(dot(normal, halfVector), 0.0);
+        float vDotH = max(dot(viewDir, halfVector), 0.0);
+        float alphaRoughness = roughness * roughness;
+        float distribution = distributionGgx(nDotH, alphaRoughness);
+        float visibility = visibilitySmithGgxCorrelated(nDotV, nDotL, alphaRoughness);
+        vec3 fresnel = fresnelSchlick(vDotH, f0);
+        vec3 specular = distribution * visibility * fresnel;
+        vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * baseColor / PI;
+        vec3 radiance = light.ColorIntensity.rgb * light.ColorIntensity.w * attenuation * cone * 0.18;
+        directLighting += (diffuse + specular) * radiance * nDotL;
     }
 
-    // Match Material.SampleEmission() for the common glTF case used by this
-    // preview: without a separate emissive texture, the already sampled base
-    // color is the emission source. Using emissionColor alone turns textured
-    // emissive surfaces into solid white.
-    vec3 emission = baseColor * materialEmission.rgb * materialEmission.a;
-    linear += emission;
-    vec3 srgb = pow(clamp(linear, 0.0, 1.0), vec3(1.0 / 2.2));
-    outColor = vec4(srgb, 1.0);
+    vec3 reflection = reflect(-viewDir, normal);
+    vec3 fresnelIbl = f0 + (max(vec3(1.0 - roughness), f0) - f0) * pow(1.0 - nDotV, 5.0);
+    vec3 diffuseIbl = diffuseEnvironment(normal) * baseColor * (vec3(1.0) - fresnelIbl) * (1.0 - metallic);
+    vec3 sharpSpecularIbl = studioEnvironment(reflection);
+    vec3 broadSpecularIbl = diffuseEnvironment(normal);
+    vec3 specularIbl = mix(sharpSpecularIbl, broadSpecularIbl, roughness * roughness) * fresnelIbl;
+    vec3 indirectLighting = (diffuseIbl + specularIbl) * occlusion * 0.72;
+
+    if (debugMode == 10)
+    {
+        outColor = vec4(linearToSrgb(pbrNeutralToneMap(directLighting)), 1.0);
+        return;
+    }
+    if (debugMode == 11)
+    {
+        outColor = vec4(linearToSrgb(pbrNeutralToneMap(indirectLighting)), 1.0);
+        return;
+    }
+
+    vec3 linearColor = directLighting + indirectLighting + emissive;
+    vec3 outputColor = linearToSrgb(pbrNeutralToneMap(linearColor));
+    outColor = vec4(outputColor, alphaMode == 2 ? alpha : 1.0);
 }
 ";
 }

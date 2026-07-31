@@ -182,7 +182,7 @@ internal sealed class PreviewSceneSession : IDisposable
                 VulkanSceneComputeRenderer.ReleasePreparedScene();
                 VulkanRasterRenderer.ReleasePreparedScene();
                 throw new InvalidOperationException(
-                    "Vulkan could not reserve enough memory for this scene. The scene cache was released; try Vulkan raster, lower the memory budget, or simplify the model.",
+                    "Vulkan could not reserve enough memory for this scene. The scene cache was released; try Vulkan raster, close other GPU-heavy applications, or simplify the model.",
                     ex);
             }
 

@@ -24,6 +24,7 @@ public sealed class AssetRegistry
             RegisterTexture(registry, textureByRef, triangle.Material.EmissiveTexture);
             RegisterTexture(registry, textureByRef, triangle.Material.MetallicRoughnessTexture);
             RegisterTexture(registry, textureByRef, triangle.Material.NormalTexture);
+            RegisterTexture(registry, textureByRef, triangle.Material.OcclusionTexture);
 
             string key = MaterialKey(triangle.Material);
             if (!materialByKey.ContainsKey(key))
@@ -53,6 +54,8 @@ public sealed class AssetRegistry
             material.Color.X, material.Color.Y, material.Color.Z,
             material.Emission, material.EmissionColor.X, material.EmissionColor.Y, material.EmissionColor.Z,
             material.Alpha, material.AlphaBlend, material.Metallic, material.Roughness, material.Transmission,
-            material.Texture?.Name, material.EmissiveTexture?.Name, material.MetallicRoughnessTexture?.Name, material.NormalTexture?.Name);
+            material.Texture?.Name, material.EmissiveTexture?.Name, material.MetallicRoughnessTexture?.Name,
+            material.NormalTexture?.Name, material.OcclusionTexture?.Name, material.NormalScale, material.OcclusionStrength,
+            material.AlphaMode, material.AlphaCutoff, material.DoubleSided);
     }
 }

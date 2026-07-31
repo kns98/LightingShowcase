@@ -590,7 +590,9 @@ public sealed class Scene
         foreach (Triangle tri in triangles)
         {
             Material material = colorOverride ?? tri.Material;
-            child.AddTriangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, material);
+            child.AddTriangle(
+                tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC,
+                tri.NormalA, tri.NormalB, tri.NormalC, material);
         }
         child.RecalculatePivot();
         return child;
@@ -893,5 +895,17 @@ public sealed class Scene
             activeGroups.Peek().AddTriangle(a, b, c, uvA, uvB, uvC, material);
         else
             Triangles.Add(new Triangle(a, b, c, uvA, uvB, uvC, material));
+    }
+
+    public void AddTriangle(
+        Vec3 a, Vec3 b, Vec3 c,
+        Vec2 uvA, Vec2 uvB, Vec2 uvC,
+        Vec3 normalA, Vec3 normalB, Vec3 normalC,
+        Material material)
+    {
+        if (activeGroups.Count > 0)
+            activeGroups.Peek().AddTriangle(a, b, c, uvA, uvB, uvC, normalA, normalB, normalC, material);
+        else
+            Triangles.Add(new Triangle(a, b, c, uvA, uvB, uvC, normalA, normalB, normalC, material));
     }
 }

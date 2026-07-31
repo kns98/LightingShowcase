@@ -26,6 +26,8 @@ public sealed class MaterialDefinition
     public double EmissiveStrength { get; set; }
     public double Opacity { get; set; } = 1.0;
     public bool AlphaBlend { get; set; }
+    public MaterialAlphaMode AlphaMode { get; set; } = MaterialAlphaMode.Opaque;
+    public double AlphaCutoff { get; set; } = 0.5;
     public double Transmission { get; set; }
     public bool DoubleSided { get; set; }
 
@@ -42,17 +44,31 @@ public sealed class MaterialDefinition
             Roughness = material.Roughness,
             MetallicRoughnessTextureId = material.MetallicRoughnessTexture?.Name,
             NormalTextureId = material.NormalTexture?.Name,
+            NormalScale = material.NormalScale,
+            OcclusionTextureId = material.OcclusionTexture?.Name,
+            OcclusionStrength = material.OcclusionStrength,
             EmissiveColor = material.EmissionColor,
             EmissiveTextureId = material.EmissiveTexture?.Name,
             EmissiveStrength = material.Emission,
             Opacity = material.Alpha,
             AlphaBlend = material.AlphaBlend,
-            Transmission = material.Transmission
+            AlphaMode = material.AlphaMode,
+            AlphaCutoff = material.AlphaCutoff,
+            Transmission = material.Transmission,
+            DoubleSided = material.DoubleSided
         };
     }
 
-    public Material ToMaterial(TextureMap? baseColorTexture = null, TextureMap? emissiveTexture = null, TextureMap? metallicRoughnessTexture = null, TextureMap? normalTexture = null)
+    public Material ToMaterial(
+        TextureMap? baseColorTexture = null,
+        TextureMap? emissiveTexture = null,
+        TextureMap? metallicRoughnessTexture = null,
+        TextureMap? normalTexture = null,
+        TextureMap? occlusionTexture = null)
     {
-        return new Material(BaseColor, EmissiveStrength, null, baseColorTexture, EmissiveColor, emissiveTexture, Opacity, AlphaBlend, Metallic, Roughness, Transmission, metallicRoughnessTexture, normalTexture);
+        return new Material(
+            BaseColor, EmissiveStrength, null, baseColorTexture, EmissiveColor, emissiveTexture,
+            Opacity, AlphaBlend, Metallic, Roughness, Transmission, metallicRoughnessTexture,
+            normalTexture, occlusionTexture, NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided);
     }
 }

@@ -24,6 +24,9 @@ public sealed class Triangle
     public Material Material { get; }
     public int GroupId { get; }
     public Vec3 Normal { get; }
+    public Vec3 NormalA { get; }
+    public Vec3 NormalB { get; }
+    public Vec3 NormalC { get; }
     public Vec3 Centroid { get; }
     public Aabb Bounds { get; }
 
@@ -38,6 +41,16 @@ public sealed class Triangle
 
     /// <summary>Constructs and initializes this component.</summary>
     public Triangle(Vec3 a, Vec3 b, Vec3 c, Vec2 uvA, Vec2 uvB, Vec2 uvC, Material material, int groupId = -1)
+        : this(a, b, c, uvA, uvB, uvC, Vec3.Zero, Vec3.Zero, Vec3.Zero, material, groupId)
+    {
+    }
+
+    /// <summary>Constructs a triangle with authored per-vertex shading normals.</summary>
+    public Triangle(
+        Vec3 a, Vec3 b, Vec3 c,
+        Vec2 uvA, Vec2 uvB, Vec2 uvC,
+        Vec3 normalA, Vec3 normalB, Vec3 normalC,
+        Material material, int groupId = -1)
     {
         A = a; B = b; C = c;
         UvA = uvA; UvB = uvB; UvC = uvC;
@@ -45,6 +58,9 @@ public sealed class Triangle
         edge1 = b - a;
         edge2 = c - a;
         Normal = edge1.Cross(edge2).Normalize();
+        NormalA = NormalizeOrFallback(normalA, Normal);
+        NormalB = NormalizeOrFallback(normalB, Normal);
+        NormalC = NormalizeOrFallback(normalC, Normal);
         Centroid = (a + b + c) / 3.0;
         Bounds = Aabb.Around(this);
     }
@@ -71,6 +87,15 @@ public sealed class Triangle
 
         double w = 1.0 - u - v;
         Vec2 uv = UvA * w + UvB * u + UvC * v;
-        return new Hit(t, ray.Origin + ray.Direction * t, Normal, Material, GroupId, uv.U, uv.V);
+        Vec3 shadingNormal = NormalizeOrFallback(NormalA * w + NormalB * u + NormalC * v, Normal);
+        if (shadingNormal.Dot(Normal) < 0.0)
+            shadingNormal = -shadingNormal;
+        return new Hit(t, ray.Origin + ray.Direction * t, shadingNormal, Material, GroupId, uv.U, uv.V);
+    }
+
+    private static Vec3 NormalizeOrFallback(Vec3 value, Vec3 fallback)
+    {
+        double length = value.Length();
+        return double.IsFinite(length) && length > 1e-12 ? value / length : fallback;
     }
 }

@@ -252,7 +252,13 @@ public sealed partial class LightingShowcaseForm
             material.Roughness,
             material.Transmission,
             material.MetallicRoughnessTexture,
-            material.NormalTexture));
+            material.NormalTexture,
+            material.OcclusionTexture,
+            material.NormalScale,
+            material.OcclusionStrength,
+            material.AlphaMode,
+            material.AlphaCutoff,
+            material.DoubleSided));
     }
 
     private static Vec3 EstimateLightColor(Material? material)

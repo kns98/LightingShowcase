@@ -184,6 +184,15 @@ public sealed class SceneObjectGroup
         LocalTriangles.Add(new Triangle(a, b, c, uvA, uvB, uvC, material, Id));
     }
 
+    public void AddTriangle(
+        Vec3 a, Vec3 b, Vec3 c,
+        Vec2 uvA, Vec2 uvB, Vec2 uvC,
+        Vec3 normalA, Vec3 normalB, Vec3 normalC,
+        Material material)
+    {
+        LocalTriangles.Add(new Triangle(a, b, c, uvA, uvB, uvC, normalA, normalB, normalC, material, Id));
+    }
+
     public void RecalculatePivot()
     {
         List<Vec3> points = new();
@@ -221,7 +230,7 @@ public sealed class SceneObjectGroup
             child.BakeCurrentTransform();
 
         if (HasPendingTransform())
-            ApplyPointTransformRecursively(TransformPoint);
+            ApplyPointTransformRecursively(TransformPoint, TransformNormal);
 
         ResetTransform();
         foreach (SceneObjectGroup child in Children)
@@ -249,8 +258,14 @@ public sealed class SceneObjectGroup
                 tri.Material.Roughness,
                 tri.Material.Transmission,
                 tri.Material.MetallicRoughnessTexture,
-                tri.Material.NormalTexture);
-            return new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, updated, tri.GroupId);
+                tri.Material.NormalTexture,
+                tri.Material.OcclusionTexture,
+                tri.Material.NormalScale,
+                tri.Material.OcclusionStrength,
+                tri.Material.AlphaMode,
+                tri.Material.AlphaCutoff,
+                tri.Material.DoubleSided);
+            return new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, tri.NormalA, tri.NormalB, tri.NormalC, updated, tri.GroupId);
         });
         ColorOverride = null;
         RecalculatePivot();
@@ -284,20 +299,27 @@ public sealed class SceneObjectGroup
                 tri.Material.Roughness,
                 tri.Material.Transmission,
                 tri.Material.MetallicRoughnessTexture,
-                tri.Material.NormalTexture);
+                tri.Material.NormalTexture,
+                tri.Material.OcclusionTexture,
+                tri.Material.NormalScale,
+                tri.Material.OcclusionStrength,
+                tri.Material.AlphaMode,
+                tri.Material.AlphaCutoff,
+                tri.Material.DoubleSided);
 
             // Manual replacement textures should preserve authored atlas UVs
             // from OBJ/glTF imports.  Editor-created primitives normally still
             // have the default unit triangle UVs, so they fall through to box
             // projection and tile like before.
             if (!forceBoxProjection && !HasDefaultUnitUvs(tri))
-                return new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, updated, tri.GroupId);
+                return new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, tri.NormalA, tri.NormalB, tri.NormalC, updated, tri.GroupId);
 
             return new Triangle(
                 tri.A, tri.B, tri.C,
                 GenerateBoxUv(tri.A, tri.Normal, bounds, safeTileWorldUnits),
                 GenerateBoxUv(tri.B, tri.Normal, bounds, safeTileWorldUnits),
                 GenerateBoxUv(tri.C, tri.Normal, bounds, safeTileWorldUnits),
+                tri.NormalA, tri.NormalB, tri.NormalC,
                 updated,
                 tri.GroupId);
         });
@@ -321,6 +343,7 @@ public sealed class SceneObjectGroup
                 GenerateBoxUv(tri.A, tri.Normal, bounds, safeTileWorldUnits),
                 GenerateBoxUv(tri.B, tri.Normal, bounds, safeTileWorldUnits),
                 GenerateBoxUv(tri.C, tri.Normal, bounds, safeTileWorldUnits),
+                tri.NormalA, tri.NormalB, tri.NormalC,
                 tri.Material,
                 tri.GroupId);
         });
@@ -372,7 +395,7 @@ public sealed class SceneObjectGroup
         ApplyMaterialRecursively(tri =>
         {
             Material updated = tri.Material.WithTexture(null);
-            return new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, updated, tri.GroupId);
+            return new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, tri.NormalA, tri.NormalB, tri.NormalC, updated, tri.GroupId);
         });
         ColorOverride = null;
         RecalculatePivot();
@@ -389,7 +412,7 @@ public sealed class SceneObjectGroup
             Material updated = materialTransform(tri.Material);
             return ReferenceEquals(updated, tri.Material)
                 ? tri
-                : new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, updated, tri.GroupId);
+                : new Triangle(tri.A, tri.B, tri.C, tri.UvA, tri.UvB, tri.UvC, tri.NormalA, tri.NormalB, tri.NormalC, updated, tri.GroupId);
         });
         ColorOverride = null;
         RecalculatePivot();
@@ -442,7 +465,11 @@ public sealed class SceneObjectGroup
         foreach (Triangle tri in LocalTriangles)
         {
             Material material = ColorOverride ?? tri.Material;
-            yield return new Triangle(TransformPoint(tri.A), TransformPoint(tri.B), TransformPoint(tri.C), tri.UvA, tri.UvB, tri.UvC, material, Id);
+            yield return new Triangle(
+                TransformPoint(tri.A), TransformPoint(tri.B), TransformPoint(tri.C),
+                tri.UvA, tri.UvB, tri.UvC,
+                TransformNormal(tri.NormalA), TransformNormal(tri.NormalB), TransformNormal(tri.NormalC),
+                material, Id);
         }
 
         foreach (SceneObjectGroup child in Children)
@@ -457,6 +484,9 @@ public sealed class SceneObjectGroup
                     childTri.UvA,
                     childTri.UvB,
                     childTri.UvC,
+                    TransformNormal(childTri.NormalA),
+                    TransformNormal(childTri.NormalB),
+                    TransformNormal(childTri.NormalC),
                     material,
                     Id);
             }
@@ -468,20 +498,29 @@ public sealed class SceneObjectGroup
         return TransformConverter.ApplySrt(p, Pivot, Position, Rotation, Scale);
     }
 
+    public Vec3 TransformNormal(Vec3 normal)
+    {
+        return TransformConverter.ApplySrtNormal(normal, Rotation, Scale);
+    }
+
     private bool HasPendingTransform() =>
         Position.Length() > 1e-12 || Rotation.Length() > 1e-12 ||
         Math.Abs(Scale.X - 1.0) > 1e-12 || Math.Abs(Scale.Y - 1.0) > 1e-12 || Math.Abs(Scale.Z - 1.0) > 1e-12;
 
-    private void ApplyPointTransformRecursively(Func<Vec3, Vec3> transform)
+    private void ApplyPointTransformRecursively(Func<Vec3, Vec3> pointTransform, Func<Vec3, Vec3> normalTransform)
     {
         for (int i = 0; i < LocalTriangles.Count; i++)
         {
             Triangle tri = LocalTriangles[i];
-            LocalTriangles[i] = new Triangle(transform(tri.A), transform(tri.B), transform(tri.C), tri.UvA, tri.UvB, tri.UvC, tri.Material, tri.GroupId);
+            LocalTriangles[i] = new Triangle(
+                pointTransform(tri.A), pointTransform(tri.B), pointTransform(tri.C),
+                tri.UvA, tri.UvB, tri.UvC,
+                normalTransform(tri.NormalA), normalTransform(tri.NormalB), normalTransform(tri.NormalC),
+                tri.Material, tri.GroupId);
         }
 
         foreach (SceneObjectGroup child in Children)
-            child.ApplyPointTransformRecursively(transform);
+            child.ApplyPointTransformRecursively(pointTransform, normalTransform);
     }
 
     private void ApplyMaterialRecursively(Func<Triangle, Triangle> transform)

@@ -50,6 +50,7 @@ public readonly struct Vec3
 
     public static Vec3 operator +(Vec3 a, Vec3 b) => new(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
     public static Vec3 operator -(Vec3 a, Vec3 b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+    public static Vec3 operator -(Vec3 value) => new(-value.X, -value.Y, -value.Z);
     public static Vec3 operator *(Vec3 a, double s) => new(a.X * s, a.Y * s, a.Z * s);
     public static Vec3 operator *(double s, Vec3 a) => a * s;
     public static Vec3 operator /(Vec3 a, double s) => new(a.X / s, a.Y / s, a.Z / s);

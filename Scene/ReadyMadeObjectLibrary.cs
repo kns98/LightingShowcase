@@ -276,7 +276,9 @@ public static class ReadyMadeObjectLibrary
 
         group.LocalTriangles.Clear();
         foreach (Triangle triangle in shadow.LocalTriangles)
-            group.LocalTriangles.Add(new Triangle(triangle.A, triangle.B, triangle.C, triangle.UvA, triangle.UvB, triangle.UvC, triangle.Material, group.Id));
+            group.LocalTriangles.Add(new Triangle(
+                triangle.A, triangle.B, triangle.C, triangle.UvA, triangle.UvB, triangle.UvC,
+                triangle.NormalA, triangle.NormalB, triangle.NormalC, triangle.Material, group.Id));
         group.RecalculatePivot();
         return true;
     }
