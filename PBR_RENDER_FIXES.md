@@ -22,7 +22,7 @@ This change corrects the visual treatment of glTF/GLB assets in the Linux Vulkan
 - Adds material fields for occlusion, normal scale, occlusion strength, alpha mode/cutoff, and double-sided state.
 - Preserves those fields through editor material operations and asset registration.
 - Adds per-vertex normals to scene triangles and object transformations.
-- Advances the binary LightingShowcase scene format to version 8 so normals and the additional PBR fields survive save/load; version 8 continues to read older files. Older application builds will reject version 8 files rather than silently discarding the added data.
+- Advances the binary LightingShowcase scene format to version 9 so normals, transmission textures, and optical PBR fields survive save/load; version 9 continues to read older files. Older application builds will reject version 9 files rather than silently discarding the added data.
 
 ## Validation performed
 

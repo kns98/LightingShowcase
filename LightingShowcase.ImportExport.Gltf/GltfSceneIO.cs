@@ -291,7 +291,9 @@ public static class GltfSceneIO
                             material.EmissionColor, material.EmissiveTexture, material.Alpha, material.AlphaBlend,
                             material.Metallic, material.Roughness, material.Transmission, material.MetallicRoughnessTexture,
                             material.NormalTexture, material.OcclusionTexture, material.NormalScale, material.OcclusionStrength,
-                            material.AlphaMode, material.AlphaCutoff, material.DoubleSided, material.TransmissionTexture);
+                            material.AlphaMode, material.AlphaCutoff, material.DoubleSided, material.TransmissionTexture,
+                            material.Ior, material.Thickness, material.AttenuationColor, material.AttenuationDistance,
+                            material.Clearcoat, material.ClearcoatRoughness, material.ClearcoatUsesTransmissionTexture);
                     }
                     if (ia < normals.Count && ib < normals.Count && ic < normals.Count)
                     {
@@ -600,6 +602,15 @@ public static class GltfSceneIO
             double metallic = 1.0;
             double roughness = 1.0;
             double transmission = 0.0;
+            double ior = 1.5;
+            double thickness = 0.0;
+            Vec3 attenuationColor = new(1.0, 1.0, 1.0);
+            double attenuationDistance = 0.0;
+            double clearcoat = 0.0;
+            double clearcoatRoughness = 0.0;
+            bool clearcoatUsesTransmissionTexture = false;
+            int transmissionTextureIndex = -1;
+            int clearcoatTextureIndex = -1;
             TextureMap? texture = null;
             TextureMap? emissiveTexture = null;
             TextureMap? metallicRoughnessTexture = null;
@@ -729,6 +740,7 @@ public static class GltfSceneIO
                         transmissionTextureEl.TryGetProperty("index", out JsonElement transmissionTextureIndexEl))
                     {
                         int textureIndex = transmissionTextureIndexEl.GetInt32();
+                        transmissionTextureIndex = textureIndex;
                         if (!textureCache.TryGetValue(textureIndex, out transmissionTexture))
                         {
                             transmissionTexture = TryReadTexture(root, buffers, sceneFilePath, textureIndex);
@@ -738,10 +750,42 @@ public static class GltfSceneIO
                     }
                 }
                 if (matExt.TryGetProperty("KHR_materials_ior", out JsonElement iorExt) &&
-                    iorExt.TryGetProperty("ior", out JsonElement _))
+                    iorExt.TryGetProperty("ior", out JsonElement iorEl))
                 {
-                    // The current renderer uses a practical transmission approximation rather than refraction.
+                    ior = iorEl.GetDouble();
                 }
+
+                if (matExt.TryGetProperty("KHR_materials_volume", out JsonElement volumeExt))
+                {
+                    if (volumeExt.TryGetProperty("thicknessFactor", out JsonElement thicknessEl))
+                        thickness = thicknessEl.GetDouble();
+                    if (volumeExt.TryGetProperty("attenuationDistance", out JsonElement attenuationDistanceEl))
+                        attenuationDistance = attenuationDistanceEl.GetDouble();
+                    if (volumeExt.TryGetProperty("attenuationColor", out JsonElement attenuationColorEl) &&
+                        attenuationColorEl.ValueKind == JsonValueKind.Array && attenuationColorEl.GetArrayLength() >= 3)
+                    {
+                        attenuationColor = new Vec3(
+                            attenuationColorEl[0].GetDouble(),
+                            attenuationColorEl[1].GetDouble(),
+                            attenuationColorEl[2].GetDouble());
+                    }
+                }
+
+                if (matExt.TryGetProperty("KHR_materials_clearcoat", out JsonElement clearcoatExt))
+                {
+                    if (clearcoatExt.TryGetProperty("clearcoatFactor", out JsonElement clearcoatEl))
+                        clearcoat = clearcoatEl.GetDouble();
+                    if (clearcoatExt.TryGetProperty("clearcoatRoughnessFactor", out JsonElement clearcoatRoughnessEl))
+                        clearcoatRoughness = clearcoatRoughnessEl.GetDouble();
+                    if (clearcoatExt.TryGetProperty("clearcoatTexture", out JsonElement clearcoatTextureEl) &&
+                        clearcoatTextureEl.TryGetProperty("index", out JsonElement clearcoatTextureIndexEl))
+                    {
+                        clearcoatTextureIndex = clearcoatTextureIndexEl.GetInt32();
+                    }
+                }
+
+                clearcoatUsesTransmissionTexture =
+                    transmissionTextureIndex >= 0 && clearcoatTextureIndex == transmissionTextureIndex;
             }
 
             result.Add(new GltfMaterial(new Material(
@@ -750,7 +794,10 @@ public static class GltfSceneIO
                 metallicRoughnessTexture: metallicRoughnessTexture, normalTexture: normalTexture, occlusionTexture: occlusionTexture,
                 normalScale: normalScale, occlusionStrength: occlusionStrength, alphaMode: alphaMode,
                 alphaCutoff: alphaCutoff, doubleSided: doubleSided,
-                transmissionTexture: transmissionTexture), baseColorTexCoord));
+                transmissionTexture: transmissionTexture, ior: ior, thickness: thickness,
+                attenuationColor: attenuationColor, attenuationDistance: attenuationDistance,
+                clearcoat: clearcoat, clearcoatRoughness: clearcoatRoughness,
+                clearcoatUsesTransmissionTexture: clearcoatUsesTransmissionTexture), baseColorTexCoord));
         }
         return result;
     }

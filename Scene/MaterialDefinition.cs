@@ -30,6 +30,13 @@ public sealed class MaterialDefinition
     public MaterialAlphaMode AlphaMode { get; set; } = MaterialAlphaMode.Opaque;
     public double AlphaCutoff { get; set; } = 0.5;
     public double Transmission { get; set; }
+    public double Ior { get; set; } = 1.5;
+    public double Thickness { get; set; }
+    public Vec3 AttenuationColor { get; set; } = new(1, 1, 1);
+    public double AttenuationDistance { get; set; }
+    public double Clearcoat { get; set; }
+    public double ClearcoatRoughness { get; set; }
+    public bool ClearcoatUsesTransmissionTexture { get; set; }
     public bool DoubleSided { get; set; }
 
     public static MaterialDefinition FromMaterial(Material material, string id, string name)
@@ -57,6 +64,13 @@ public sealed class MaterialDefinition
             AlphaMode = material.AlphaMode,
             AlphaCutoff = material.AlphaCutoff,
             Transmission = material.Transmission,
+            Ior = material.Ior,
+            Thickness = material.Thickness,
+            AttenuationColor = material.AttenuationColor,
+            AttenuationDistance = material.AttenuationDistance,
+            Clearcoat = material.Clearcoat,
+            ClearcoatRoughness = material.ClearcoatRoughness,
+            ClearcoatUsesTransmissionTexture = material.ClearcoatUsesTransmissionTexture,
             DoubleSided = material.DoubleSided
         };
     }
@@ -73,6 +87,7 @@ public sealed class MaterialDefinition
             BaseColor, EmissiveStrength, null, baseColorTexture, EmissiveColor, emissiveTexture,
             Opacity, AlphaBlend, Metallic, Roughness, Transmission, metallicRoughnessTexture,
             normalTexture, occlusionTexture, NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided,
-            transmissionTexture);
+            transmissionTexture, Ior, Thickness, AttenuationColor, AttenuationDistance, Clearcoat,
+            ClearcoatRoughness, ClearcoatUsesTransmissionTexture);
     }
 }

@@ -266,8 +266,10 @@ public static class VulkanRasterRenderer
         public readonly Vector4 EmissiveFactor;
         public readonly Vector4 PbrFactors;      // x=metallic, y=roughness, z=normal scale, w=occlusion strength
         public readonly Vector4 AlphaFlags;      // x=alpha mode, y=cutoff, z=double sided, w=transmission
+        public readonly Vector4 OpticalFactors;  // x=ior, y=thickness, z=clearcoat, w=clearcoat roughness
+        public readonly Vector4 AttenuationColorDistance; // rgb=attenuation color, w=distance (0=infinite)
         public readonly Vector4 TextureFlags;    // base, metallic-roughness, normal, emissive
-        public readonly Vector4 TextureFlags2;   // x=occlusion
+        public readonly Vector4 TextureFlags2;   // x=occlusion, y=transmission, z=clearcoat reuses transmission mask
 
         public readonly Vector4 BaseAtlasTransform;
         public readonly Vector4 BaseTextureAddress;
@@ -314,6 +316,16 @@ public static class VulkanRasterRenderer
                 (float)material.AlphaCutoff,
                 material.DoubleSided ? 1.0f : 0.0f,
                 (float)material.Transmission);
+            OpticalFactors = new Vector4(
+                (float)material.Ior,
+                (float)material.Thickness,
+                (float)material.Clearcoat,
+                (float)material.ClearcoatRoughness);
+            AttenuationColorDistance = new Vector4(
+                (float)material.AttenuationColor.X,
+                (float)material.AttenuationColor.Y,
+                (float)material.AttenuationColor.Z,
+                (float)material.AttenuationDistance);
             TextureFlags = new Vector4(
                 basePlacement.HasTexture ? 1.0f : 0.0f,
                 mrPlacement.HasTexture ? 1.0f : 0.0f,
@@ -322,7 +334,7 @@ public static class VulkanRasterRenderer
             TextureFlags2 = new Vector4(
                 occlusionPlacement.HasTexture ? 1.0f : 0.0f,
                 transmissionPlacement.HasTexture ? 1.0f : 0.0f,
-                0.0f,
+                material.ClearcoatUsesTransmissionTexture ? 1.0f : 0.0f,
                 0.0f);
 
             BaseAtlasTransform = basePlacement.AtlasTransform;
@@ -1158,10 +1170,13 @@ public static class VulkanRasterRenderer
 
     private static bool IsTransparentMaterial(Material material)
     {
-        return material.AlphaBlend ||
-               material.Alpha < 0.999 ||
-               material.Transmission > 0.001 ||
-               EffectiveMaterialAlpha(material) < 0.999;
+        // KHR_materials_transmission does not make a surface geometrically
+        // transparent. OPAQUE and MASK transmission materials still represent
+        // a covered surface and must write depth. Sending them through the
+        // alpha-blended, depth-write-disabled pass lets farther lamp parts draw
+        // over the nearer glass as the camera orbits. Only genuine alpha BLEND
+        // materials belong in the transparent pass.
+        return material.AlphaMode == MaterialAlphaMode.Blend;
     }
 
     private static double EffectiveMaterialAlpha(Material material)
@@ -1626,6 +1641,8 @@ struct RasterMaterial
     vec4 EmissiveFactor;
     vec4 PbrFactors;
     vec4 AlphaFlags;
+    vec4 OpticalFactors;
+    vec4 AttenuationColorDistance;
     vec4 TextureFlags;
     vec4 TextureFlags2;
 
@@ -1850,16 +1867,24 @@ void main()
     vec3 baseColor = material.BaseColorAlpha.rgb * (hasBase ? srgbToLinear(baseTexel.rgb) : vec3(1.0));
     float sourceAlpha = material.BaseColorAlpha.a * baseTexel.a;
     float alpha = sourceAlpha;
+    float sampledTransmission = 1.0;
     float transmission = clamp(material.AlphaFlags.w, 0.0, 1.0);
     if (hasTransmissionTexture)
     {
-        float sampledTransmission = sampleAtlasTexture(
+        sampledTransmission = sampleAtlasTexture(
             fsUv,
             material.TransmissionAtlasTransform,
             material.TransmissionTextureAddress,
             material.TransmissionTextureTransform).r;
         transmission *= sampledTransmission;
     }
+
+    float ior = clamp(material.OpticalFactors.x, 1.0, 2.333);
+    float thickness = max(material.OpticalFactors.y, 0.0);
+    float clearcoat = clamp(material.OpticalFactors.z, 0.0, 1.0);
+    if (material.TextureFlags2.z > 0.5)
+        clearcoat *= sampledTransmission;
+    float clearcoatRoughness = clamp(material.OpticalFactors.w, 0.045, 1.0);
     int alphaMode = int(material.AlphaFlags.x + 0.5);
     if (alphaMode == 0)
         alpha = 1.0;
@@ -1970,8 +1995,10 @@ void main()
     }
 
     float nDotV = max(dot(normal, viewDir), 0.0001);
-    vec3 f0 = mix(vec3(0.04), baseColor, metallic);
+    float dielectricF0 = pow((ior - 1.0) / max(ior + 1.0, 0.0001), 2.0);
+    vec3 f0 = mix(vec3(dielectricF0), baseColor, metallic);
     vec3 directLighting = vec3(0.0);
+    vec3 clearcoatDirect = vec3(0.0);
     int lightCount = min(32, int(Camera.Counts.x + 0.5));
     for (int i = 0; i < lightCount; i++)
     {
@@ -2031,6 +2058,19 @@ void main()
         vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - metallic) * baseColor / PI;
         vec3 radiance = light.ColorIntensity.rgb * light.ColorIntensity.w * attenuation * cone * 0.18;
         directLighting += (diffuse + specular) * radiance * nDotL;
+
+        // KHR_materials_clearcoat adds a dielectric layer. Reuse the already
+        // sampled transmission mask when the asset shares that texture, so the
+        // StainedGlassLamp path adds ALU only and no extra texture fetch.
+        if (clearcoat > 0.001)
+        {
+            float clearcoatAlpha = clearcoatRoughness * clearcoatRoughness;
+            float clearcoatDistribution = distributionGgx(nDotH, clearcoatAlpha);
+            float clearcoatVisibility = visibilitySmithGgxCorrelated(nDotV, nDotL, clearcoatAlpha);
+            vec3 clearcoatFresnel = fresnelSchlick(vDotH, vec3(0.04));
+            clearcoatDirect += clearcoat * clearcoatDistribution * clearcoatVisibility *
+                clearcoatFresnel * radiance * nDotL;
+        }
     }
 
     vec3 reflection = reflect(-viewDir, normal);
@@ -2052,26 +2092,56 @@ void main()
         return;
     }
 
-    vec3 linearColor = directLighting + indirectLighting + emissive;
+    vec3 surfaceLighting = directLighting + indirectLighting;
 
-    // Vulkan raster has no resolved scene-color texture to refract. Approximate
-    // glTF transmission by reducing the opaque surface response and blending a
-    // colored transmitted-light term over the already rendered scene. This is
-    // intentionally lightweight, but preserves stained-glass color instead of
-    // turning transmission materials into opaque white PBR surfaces.
+    // Keep the fast single-pass raster path: transmission changes the shaded
+    // light, never surface coverage. This follows glTF's separation of optical
+    // transmission from alpha while avoiding a framebuffer resolve, mip chain,
+    // additional render pass, or any extra texture sample for StainedGlassLamp.
     if (transmission > 0.001)
     {
-        vec3 glassTint = mix(vec3(1.0), baseColor, 0.78);
-        vec3 transmittedLight = glassTint * (vec3(0.08) + diffuseEnvironment(-normal) * 0.42);
-        linearColor = mix(linearColor, transmittedLight + emissive, transmission * 0.82);
+        vec3 refractedDirection = refract(-viewDir, normal, 1.0 / ior);
+        if (dot(refractedDirection, refractedDirection) < 0.000001)
+            refractedDirection = reflection;
+
+        float transmissionBlur = roughness * roughness;
+        vec3 transmittedEnvironment = mix(
+            studioEnvironment(refractedDirection),
+            diffuseEnvironment(-normal) * 1.35,
+            transmissionBlur);
+
+        vec3 glassTint = mix(vec3(1.0), max(baseColor, vec3(0.001)), 0.72);
+        vec3 volumeAttenuation = vec3(1.0);
+        float attenuationDistance = material.AttenuationColorDistance.w;
+        if (thickness > 0.0 && attenuationDistance > 0.0)
+        {
+            float pathLength = thickness / max(abs(dot(normal, viewDir)), 0.15);
+            volumeAttenuation = pow(
+                max(material.AttenuationColorDistance.rgb, vec3(0.0001)),
+                vec3(pathLength / attenuationDistance));
+        }
+
+        vec3 transmittedLight = transmittedEnvironment * glassTint * volumeAttenuation;
+        vec3 transmissionFresnel = fresnelSchlick(nDotV, vec3(dielectricF0));
+        vec3 opticalResult = mix(transmittedLight, surfaceLighting, transmissionFresnel);
+        surfaceLighting = mix(surfaceLighting, opticalResult, transmission);
     }
 
+    vec3 linearColor = surfaceLighting + emissive;
+    if (clearcoat > 0.001)
+    {
+        float clearcoatFresnelView = 0.04 + 0.96 * pow(1.0 - nDotV, 5.0);
+        vec3 clearcoatIbl = mix(
+            sharpSpecularIbl,
+            broadSpecularIbl,
+            clearcoatRoughness * clearcoatRoughness) * clearcoatFresnelView * clearcoat;
+        linearColor *= 1.0 - clearcoat * clearcoatFresnelView;
+        linearColor += clearcoatDirect + clearcoatIbl;
+    }
+
+    // Alpha remains geometric coverage. OPAQUE and MASK transmission materials
+    // therefore stay visibly present instead of becoming ordinary transparency.
     float outputAlpha = alphaMode == 2 ? alpha : 1.0;
-    if (transmission > 0.001)
-    {
-        float coverageAlpha = alphaMode == 2 ? alpha : sourceAlpha;
-        outputAlpha = clamp(coverageAlpha * (1.0 - transmission * 0.72), 0.035, 0.98);
-    }
 
     vec3 outputColor = linearToSrgb(pbrNeutralToneMap(linearColor));
     outColor = vec4(outputColor, outputAlpha);

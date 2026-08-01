@@ -41,6 +41,13 @@ public sealed class Material
     public MaterialAlphaMode AlphaMode { get; }
     public double AlphaCutoff { get; }
     public bool DoubleSided { get; }
+    public double Ior { get; }
+    public double Thickness { get; }
+    public Vec3 AttenuationColor { get; }
+    public double AttenuationDistance { get; }
+    public double Clearcoat { get; }
+    public double ClearcoatRoughness { get; }
+    public bool ClearcoatUsesTransmissionTexture { get; }
 
     /// <summary>Constructs and initializes this component.</summary>
     public Material(
@@ -63,7 +70,14 @@ public sealed class Material
         MaterialAlphaMode alphaMode = MaterialAlphaMode.Opaque,
         double alphaCutoff = 0.5,
         bool doubleSided = false,
-        TextureMap? transmissionTexture = null)
+        TextureMap? transmissionTexture = null,
+        double ior = 1.5,
+        double thickness = 0.0,
+        Vec3? attenuationColor = null,
+        double attenuationDistance = 0.0,
+        double clearcoat = 0.0,
+        double clearcoatRoughness = 0.0,
+        bool clearcoatUsesTransmissionTexture = false)
     {
         Color = color;
         Emission = emission;
@@ -87,6 +101,17 @@ public sealed class Material
         TransmissionTexture = transmissionTexture;
         NormalScale = double.IsFinite(normalScale) ? Math.Clamp(normalScale, -8.0, 8.0) : 1.0;
         OcclusionStrength = double.IsFinite(occlusionStrength) ? Math.Clamp(occlusionStrength, 0.0, 1.0) : 1.0;
+        Ior = double.IsFinite(ior) ? Math.Clamp(ior, 1.0, 2.333) : 1.5;
+        Thickness = double.IsFinite(thickness) ? Math.Max(0.0, thickness) : 0.0;
+        Vec3 attenuation = attenuationColor ?? new Vec3(1.0, 1.0, 1.0);
+        AttenuationColor = new Vec3(
+            Math.Clamp(attenuation.X, 0.0, 1.0),
+            Math.Clamp(attenuation.Y, 0.0, 1.0),
+            Math.Clamp(attenuation.Z, 0.0, 1.0));
+        AttenuationDistance = double.IsFinite(attenuationDistance) && attenuationDistance > 0.0 ? attenuationDistance : 0.0;
+        Clearcoat = double.IsFinite(clearcoat) ? Math.Clamp(clearcoat, 0.0, 1.0) : 0.0;
+        ClearcoatRoughness = double.IsFinite(clearcoatRoughness) ? Math.Clamp(clearcoatRoughness, 0.0, 1.0) : 0.0;
+        ClearcoatUsesTransmissionTexture = clearcoatUsesTransmissionTexture;
     }
 
     /// <summary>Samples the base color/albedo texture in its stored color space.</summary>
@@ -189,6 +214,7 @@ public sealed class Material
             Alpha, AlphaBlend, Metallic, Roughness, Transmission,
             MetallicRoughnessTexture, NormalTexture, OcclusionTexture,
             NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided,
-            TransmissionTexture);
+            TransmissionTexture, Ior, Thickness, AttenuationColor, AttenuationDistance,
+            Clearcoat, ClearcoatRoughness, ClearcoatUsesTransmissionTexture);
     }
 }

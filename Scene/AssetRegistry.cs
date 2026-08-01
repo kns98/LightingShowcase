@@ -58,6 +58,8 @@ public sealed class AssetRegistry
             material.Texture?.Name, material.EmissiveTexture?.Name, material.MetallicRoughnessTexture?.Name,
             material.NormalTexture?.Name, material.OcclusionTexture?.Name, material.TransmissionTexture?.Name,
             material.NormalScale, material.OcclusionStrength,
-            material.AlphaMode, material.AlphaCutoff, material.DoubleSided);
+            material.AlphaMode, material.AlphaCutoff, material.DoubleSided,
+            material.Ior, material.Thickness, material.AttenuationColor.X, material.AttenuationColor.Y, material.AttenuationColor.Z,
+            material.AttenuationDistance, material.Clearcoat, material.ClearcoatRoughness, material.ClearcoatUsesTransmissionTexture);
     }
 }

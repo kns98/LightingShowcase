@@ -19,7 +19,7 @@ namespace LightingShowcase.SceneGraph;
 public static class BinarySceneFile
 {
     private const string Magic = "LSCN";
-    private const int Version = 8;
+    private const int Version = 9;
 
     private enum GeometryKind : byte
     {
@@ -548,6 +548,17 @@ public static class BinarySceneFile
         writer.Write((byte)material.AlphaMode);
         writer.Write(material.AlphaCutoff);
         writer.Write(material.DoubleSided);
+
+        // Version 9 preserves transmission texture and the low-cost optical
+        // extension parameters used by the Vulkan raster preview.
+        writer.Write(textureTable.IdFor(material.TransmissionTexture));
+        writer.Write(material.Ior);
+        writer.Write(material.Thickness);
+        WriteVec3(writer, material.AttenuationColor);
+        writer.Write(material.AttenuationDistance);
+        writer.Write(material.Clearcoat);
+        writer.Write(material.ClearcoatRoughness);
+        writer.Write(material.ClearcoatUsesTransmissionTexture);
     }
 
     private static Material ReadMaterial(BinaryReader reader, string sceneFilePath, int version, TextureReadTable? textureTable)
@@ -579,6 +590,14 @@ public static class BinarySceneFile
             : alphaBlend ? MaterialAlphaMode.Blend : MaterialAlphaMode.Opaque;
         double alphaCutoff = version >= 8 ? reader.ReadDouble() : 0.5;
         bool doubleSided = version >= 8 && reader.ReadBoolean();
+        TextureMap? transmissionTexture = version >= 9 ? textureTable?.ById(reader.ReadInt32()) : null;
+        double ior = version >= 9 ? reader.ReadDouble() : 1.5;
+        double thickness = version >= 9 ? reader.ReadDouble() : 0.0;
+        Vec3 attenuationColor = version >= 9 ? ReadVec3(reader) : new Vec3(1.0, 1.0, 1.0);
+        double attenuationDistance = version >= 9 ? reader.ReadDouble() : 0.0;
+        double clearcoat = version >= 9 ? reader.ReadDouble() : 0.0;
+        double clearcoatRoughness = version >= 9 ? reader.ReadDouble() : 0.0;
+        bool clearcoatUsesTransmissionTexture = version >= 9 && reader.ReadBoolean();
 
         return new Material(
             color,
@@ -599,7 +618,15 @@ public static class BinarySceneFile
             occlusionStrength,
             alphaMode,
             alphaCutoff,
-            doubleSided);
+            doubleSided,
+            transmissionTexture,
+            ior,
+            thickness,
+            attenuationColor,
+            attenuationDistance,
+            clearcoat,
+            clearcoatRoughness,
+            clearcoatUsesTransmissionTexture);
     }
 
     private static void WriteTextureTable(BinaryWriter writer, TextureWriteTable textureTable)
@@ -781,7 +808,10 @@ public static class BinarySceneFile
             $"{textureTable.IdFor(material.EmissiveTexture)}|{RoundKey(material.Alpha)}|{material.AlphaBlend}|{RoundKey(material.Metallic)}|{RoundKey(material.Roughness)}|" +
             $"{RoundKey(material.Transmission)}|{textureTable.IdFor(material.MetallicRoughnessTexture)}|{textureTable.IdFor(material.NormalTexture)}|" +
             $"{textureTable.IdFor(material.OcclusionTexture)}|{RoundKey(material.NormalScale)}|{RoundKey(material.OcclusionStrength)}|" +
-            $"{(int)material.AlphaMode}|{RoundKey(material.AlphaCutoff)}|{material.DoubleSided}";
+            $"{(int)material.AlphaMode}|{RoundKey(material.AlphaCutoff)}|{material.DoubleSided}|{textureTable.IdFor(material.TransmissionTexture)}|" +
+            $"{RoundKey(material.Ior)}|{RoundKey(material.Thickness)}|{RoundKey(material.AttenuationColor.X)}|{RoundKey(material.AttenuationColor.Y)}|" +
+            $"{RoundKey(material.AttenuationColor.Z)}|{RoundKey(material.AttenuationDistance)}|{RoundKey(material.Clearcoat)}|" +
+            $"{RoundKey(material.ClearcoatRoughness)}|{material.ClearcoatUsesTransmissionTexture}";
     }
 
     private sealed class MaterialReadTable
@@ -846,6 +876,7 @@ public static class BinarySceneFile
             IdFor(material.MetallicRoughnessTexture);
             IdFor(material.NormalTexture);
             IdFor(material.OcclusionTexture);
+            IdFor(material.TransmissionTexture);
         }
 
         private static string KeyFor(TextureMap texture)
