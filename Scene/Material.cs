@@ -35,6 +35,7 @@ public sealed class Material
     public TextureMap? MetallicRoughnessTexture { get; }
     public TextureMap? NormalTexture { get; }
     public TextureMap? OcclusionTexture { get; }
+    public TextureMap? TransmissionTexture { get; }
     public double NormalScale { get; }
     public double OcclusionStrength { get; }
     public MaterialAlphaMode AlphaMode { get; }
@@ -61,7 +62,8 @@ public sealed class Material
         double occlusionStrength = 1.0,
         MaterialAlphaMode alphaMode = MaterialAlphaMode.Opaque,
         double alphaCutoff = 0.5,
-        bool doubleSided = false)
+        bool doubleSided = false,
+        TextureMap? transmissionTexture = null)
     {
         Color = color;
         Emission = emission;
@@ -82,6 +84,7 @@ public sealed class Material
         MetallicRoughnessTexture = metallicRoughnessTexture;
         NormalTexture = normalTexture;
         OcclusionTexture = occlusionTexture;
+        TransmissionTexture = transmissionTexture;
         NormalScale = double.IsFinite(normalScale) ? Math.Clamp(normalScale, -8.0, 8.0) : 1.0;
         OcclusionStrength = double.IsFinite(occlusionStrength) ? Math.Clamp(occlusionStrength, 0.0, 1.0) : 1.0;
     }
@@ -185,6 +188,7 @@ public sealed class Material
             Color, Emission, LightId, texture, EmissionColor, EmissiveTexture,
             Alpha, AlphaBlend, Metallic, Roughness, Transmission,
             MetallicRoughnessTexture, NormalTexture, OcclusionTexture,
-            NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided);
+            NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided,
+            TransmissionTexture);
     }
 }

@@ -31,7 +31,6 @@ public static class VulkanRasterRenderer
     private const double CameraFovDegrees = 72.0;
     private const double CameraNear = 0.035;
     private const double CameraFar = 5000.0;
-    private const int MaxTextureAtlasDimension = 8192;
 
     // Default to per-fragment GPU texture sampling so high-frequency glTF atlas
     // textures match the CPU shadow rasterizer. Set
@@ -118,6 +117,7 @@ public static class VulkanRasterRenderer
         public required int TotalTriangleCount { get; init; }
         public required int NearClippedTriangleCount { get; init; }
         public required int TextureCount { get; init; }
+        public required int TexturePageCount { get; init; }
         public required bool GpuTextureSamplingRequested { get; init; }
         public required bool UsesGpuTextureSampling { get; init; }
         public string? TextureFallbackReason { get; init; }
@@ -240,10 +240,11 @@ public static class VulkanRasterRenderer
         public readonly Vector4 TextureTransform; // xy=offset, zw=scale; rotation in TextureAddress.z
         public readonly bool HasTexture;
 
-        public RasterTexturePlacement(float offsetX, float offsetY, float scaleX, float scaleY, TextureMap texture)
+        public RasterTexturePlacement(float offsetX, float offsetY, float scaleX, float scaleY, int pageIndex, TextureMap texture)
         {
             AtlasTransform = new Vector4(offsetX, offsetY, scaleX, scaleY);
-            TextureAddress = new Vector4(AddressModeCode(texture.WrapU), AddressModeCode(texture.WrapV), (float)texture.Rotation, 0.0f);
+            // w stores the texture-array page. z remains the glTF texture-transform rotation.
+            TextureAddress = new Vector4(AddressModeCode(texture.WrapU), AddressModeCode(texture.WrapV), (float)texture.Rotation, pageIndex);
             TextureTransform = new Vector4((float)texture.OffsetU, (float)texture.OffsetV, (float)texture.ScaleU, (float)texture.ScaleV);
             HasTexture = true;
         }
@@ -288,13 +289,18 @@ public static class VulkanRasterRenderer
         public readonly Vector4 OcclusionTextureAddress;
         public readonly Vector4 OcclusionTextureTransform;
 
+        public readonly Vector4 TransmissionAtlasTransform;
+        public readonly Vector4 TransmissionTextureAddress;
+        public readonly Vector4 TransmissionTextureTransform;
+
         public RasterMaterial(
             Material material,
             RasterTexturePlacement basePlacement,
             RasterTexturePlacement mrPlacement,
             RasterTexturePlacement normalPlacement,
             RasterTexturePlacement emissivePlacement,
-            RasterTexturePlacement occlusionPlacement)
+            RasterTexturePlacement occlusionPlacement,
+            RasterTexturePlacement transmissionPlacement)
         {
             BaseColorAlpha = MaterialColorAlpha(material);
             EmissiveFactor = MaterialEmission(material);
@@ -313,7 +319,11 @@ public static class VulkanRasterRenderer
                 mrPlacement.HasTexture ? 1.0f : 0.0f,
                 normalPlacement.HasTexture ? 1.0f : 0.0f,
                 emissivePlacement.HasTexture ? 1.0f : 0.0f);
-            TextureFlags2 = new Vector4(occlusionPlacement.HasTexture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+            TextureFlags2 = new Vector4(
+                occlusionPlacement.HasTexture ? 1.0f : 0.0f,
+                transmissionPlacement.HasTexture ? 1.0f : 0.0f,
+                0.0f,
+                0.0f);
 
             BaseAtlasTransform = basePlacement.AtlasTransform;
             BaseTextureAddress = basePlacement.TextureAddress;
@@ -330,6 +340,9 @@ public static class VulkanRasterRenderer
             OcclusionAtlasTransform = occlusionPlacement.AtlasTransform;
             OcclusionTextureAddress = occlusionPlacement.TextureAddress;
             OcclusionTextureTransform = occlusionPlacement.TextureTransform;
+            TransmissionAtlasTransform = transmissionPlacement.AtlasTransform;
+            TransmissionTextureAddress = transmissionPlacement.TextureAddress;
+            TransmissionTextureTransform = transmissionPlacement.TextureTransform;
         }
     }
 
@@ -338,6 +351,7 @@ public static class VulkanRasterRenderer
         public required TextureMap Texture { get; init; }
         public required int X { get; init; }
         public required int Y { get; init; }
+        public required int Page { get; init; }
     }
 
     private sealed class TextureBuildResult
@@ -347,6 +361,7 @@ public static class VulkanRasterRenderer
         public required int Width { get; init; }
         public required int Height { get; init; }
         public required int TextureCount { get; init; }
+        public required int PageCount { get; init; }
         public required bool UsesGpuTextureSampling { get; init; }
         public string? FallbackReason { get; init; }
     }
@@ -355,13 +370,14 @@ public static class VulkanRasterRenderer
     {
         public required IReadOnlyDictionary<Material, int> MaterialIds { get; init; }
         public required RasterMaterial[] Materials { get; set; }
-        public int RenderableTriangleCount { get; init; }
+        public int OpaqueTriangleCount { get; init; }
+        public int TransparentTriangleCount { get; init; }
         public int NearClippedTriangles { get; init; }
         public int SourceTriangleCount { get; init; }
-        public int OpaqueVertexCount => checked(RenderableTriangleCount * 3);
-        public int TransparentVertexCount => 0;
+        public int OpaqueVertexCount => checked(OpaqueTriangleCount * 3);
+        public int TransparentVertexCount => checked(TransparentTriangleCount * 3);
         public int MaterialCount => Materials.Length;
-        public int TotalTriangles => RenderableTriangleCount;
+        public int TotalTriangles => checked(OpaqueTriangleCount + TransparentTriangleCount);
     }
 
     /// <summary>Releases the shared Vulkan graphics device and compiled raster pipeline.</summary>
@@ -522,7 +538,7 @@ public static class VulkanRasterRenderer
         total.Stop();
 
         string textureMode = prepared.UsesGpuTextureSampling
-            ? $"textures={prepared.TextureCount}"
+            ? $"textures={prepared.TextureCount}, pages={prepared.TexturePageCount}"
             : prepared.GpuTextureSamplingRequested && !string.IsNullOrWhiteSpace(prepared.TextureFallbackReason)
                 ? $"textures=base-color fallback ({prepared.TextureFallbackReason})"
                 : "textures=base color";
@@ -549,7 +565,7 @@ public static class VulkanRasterRenderer
         // Build only lightweight atlas placement metadata first. Pixel data is
         // transferred one texture at a time after the Vulkan texture exists, so
         // a full CPU-side atlas never coexists with the GPU atlas.
-        TextureBuildResult textures = BuildTextureAtlas(scene, gpuTextureSamplingRequested);
+        TextureBuildResult textures = BuildTextureAtlas(gd, scene, gpuTextureSamplingRequested);
         RasterGeometryBuildResult geometry = BuildGeometryMetadata(scene, textures.TexturePlacements, textures.UsesGpuTextureSampling);
         RasterLight[] lights = BuildLightBuffer(scene);
         ResourceFactory factory = gd.ResourceFactory;
@@ -582,10 +598,12 @@ public static class VulkanRasterRenderer
             camera = factory.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<RasterCameraConstants>(), BufferUsage.UniformBuffer));
             light = factory.CreateBuffer(new BufferDescription(lightBytes, BufferUsage.StructuredBufferReadOnly, (uint)lightStride));
             material = factory.CreateBuffer(new BufferDescription(materialBytes, BufferUsage.StructuredBufferReadOnly, (uint)materialStride));
-            atlas = factory.CreateTexture(TextureDescription.Texture2D((uint)textures.Width, (uint)textures.Height, 1, 1, Veldrid.PixelFormat.R8_G8_B8_A8_UNorm, TextureUsage.Sampled));
+            atlas = factory.CreateTexture(TextureDescription.Texture2D(
+                (uint)textures.Width, (uint)textures.Height, 1, (uint)textures.PageCount,
+                Veldrid.PixelFormat.R8_G8_B8_A8_UNorm, TextureUsage.Sampled));
             sampler = factory.CreateSampler(SamplerDescription.Linear);
 
-            UploadRasterGeometry(gd, opaque, scene, geometry.MaterialIds, cancellationToken);
+            UploadRasterGeometry(gd, opaque, transparent, scene, geometry.MaterialIds, cancellationToken);
             gd.UpdateBuffer(material, 0, geometry.Materials.Length == 0 ? new[] { default(RasterMaterial) } : geometry.Materials);
             geometry.Materials = Array.Empty<RasterMaterial>();
             gd.UpdateBuffer(light, 0, lights.Length == 0 ? new[] { default(RasterLight) } : lights);
@@ -612,6 +630,7 @@ public static class VulkanRasterRenderer
                 TotalTriangleCount = totalTriangleCount,
                 NearClippedTriangleCount = nearClippedTriangleCount,
                 TextureCount = textures.TextureCount,
+                TexturePageCount = textures.PageCount,
                 GpuTextureSamplingRequested = gpuTextureSamplingRequested,
                 UsesGpuTextureSampling = textures.UsesGpuTextureSampling,
                 TextureFallbackReason = textures.FallbackReason,
@@ -636,19 +655,25 @@ public static class VulkanRasterRenderer
 
     private static void UploadRasterGeometry(
         GraphicsDevice gd,
-        DeviceBuffer vertexBuffer,
+        DeviceBuffer opaqueVertexBuffer,
+        DeviceBuffer transparentVertexBuffer,
         Scene scene,
         IReadOnlyDictionary<Material, int> materialIds,
         CancellationToken cancellationToken)
     {
-        // Keep upload memory constant. The old path allocated arrays sized for
-        // the complete scene while the same data was also being staged by the
-        // Vulkan driver.
+        // Keep upload memory constant while preserving the separate transparent
+        // pass. The previous low-memory rewrite uploaded every triangle into the
+        // opaque buffer and hard-coded the transparent count to zero, which made
+        // transmission and alpha-blended materials depth-write as solid white.
         const int TrianglesPerChunk = 2048;
         int vertexStride = Marshal.SizeOf<RasterVertex>();
-        RasterVertex[] vertices = new RasterVertex[TrianglesPerChunk * 3];
-        int trianglesInChunk = 0;
-        int uploadedTriangles = 0;
+        RasterVertex[] opaqueVertices = new RasterVertex[TrianglesPerChunk * 3];
+        RasterVertex[] transparentVertices = new RasterVertex[TrianglesPerChunk * 3];
+        int opaqueTrianglesInChunk = 0;
+        int transparentTrianglesInChunk = 0;
+        int uploadedOpaqueTriangles = 0;
+        int uploadedTransparentTriangles = 0;
+        int processedTriangles = 0;
 
         foreach (Triangle triangle in scene.Triangles)
         {
@@ -656,24 +681,44 @@ public static class VulkanRasterRenderer
                 continue;
 
             int materialIndex = materialIds[triangle.Material];
+            bool transparent = IsTransparentMaterial(triangle.Material);
+            RasterVertex[] target = transparent ? transparentVertices : opaqueVertices;
+            int trianglesInChunk = transparent ? transparentTrianglesInChunk : opaqueTrianglesInChunk;
             int vertexIndex = trianglesInChunk * 3;
-            vertices[vertexIndex] = new RasterVertex(triangle.A, triangle.NormalA, triangle.UvA, materialIndex);
-            vertices[vertexIndex + 1] = new RasterVertex(triangle.B, triangle.NormalB, triangle.UvB, materialIndex);
-            vertices[vertexIndex + 2] = new RasterVertex(triangle.C, triangle.NormalC, triangle.UvC, materialIndex);
-            trianglesInChunk++;
+            target[vertexIndex] = new RasterVertex(triangle.A, triangle.NormalA, triangle.UvA, materialIndex);
+            target[vertexIndex + 1] = new RasterVertex(triangle.B, triangle.NormalB, triangle.UvB, materialIndex);
+            target[vertexIndex + 2] = new RasterVertex(triangle.C, triangle.NormalC, triangle.UvC, materialIndex);
 
-            if (trianglesInChunk == TrianglesPerChunk)
+            if (transparent)
             {
-                UploadChunk(trianglesInChunk);
-                trianglesInChunk = 0;
-                ThrowIfCancellationRequested(cancellationToken, "upload Vulkan raster geometry");
+                transparentTrianglesInChunk++;
+                if (transparentTrianglesInChunk == TrianglesPerChunk)
+                {
+                    UploadChunk(transparentVertexBuffer, transparentVertices, transparentTrianglesInChunk, ref uploadedTransparentTriangles);
+                    transparentTrianglesInChunk = 0;
+                }
             }
+            else
+            {
+                opaqueTrianglesInChunk++;
+                if (opaqueTrianglesInChunk == TrianglesPerChunk)
+                {
+                    UploadChunk(opaqueVertexBuffer, opaqueVertices, opaqueTrianglesInChunk, ref uploadedOpaqueTriangles);
+                    opaqueTrianglesInChunk = 0;
+                }
+            }
+
+            processedTriangles++;
+            if (processedTriangles % (TrianglesPerChunk * 2) == 0)
+                ThrowIfCancellationRequested(cancellationToken, "upload Vulkan raster geometry");
         }
 
-        if (trianglesInChunk > 0)
-            UploadChunk(trianglesInChunk);
+        if (opaqueTrianglesInChunk > 0)
+            UploadChunk(opaqueVertexBuffer, opaqueVertices, opaqueTrianglesInChunk, ref uploadedOpaqueTriangles);
+        if (transparentTrianglesInChunk > 0)
+            UploadChunk(transparentVertexBuffer, transparentVertices, transparentTrianglesInChunk, ref uploadedTransparentTriangles);
 
-        void UploadChunk(int triangleCount)
+        void UploadChunk(DeviceBuffer destination, RasterVertex[] vertices, int triangleCount, ref int uploadedTriangles)
         {
             RasterVertex[] vertexUpload = vertices;
             if (triangleCount != TrianglesPerChunk)
@@ -683,7 +728,7 @@ public static class VulkanRasterRenderer
             }
 
             uint vertexOffset = checked((uint)((long)uploadedTriangles * 3L * vertexStride));
-            gd.UpdateBuffer(vertexBuffer, vertexOffset, vertexUpload);
+            gd.UpdateBuffer(destination, vertexOffset, vertexUpload);
             uploadedTriangles += triangleCount;
         }
     }
@@ -707,7 +752,7 @@ public static class VulkanRasterRenderer
             if (source.Length != expectedPixels)
                 throw new InvalidOperationException($"Texture '{texture.Name}' returned {source.Length} pixels; expected {expectedPixels}.");
 
-            gd.UpdateTexture(atlas, source, (uint)upload.X, (uint)upload.Y, 0, (uint)width, (uint)height, 1, 0, 0);
+            gd.UpdateTexture(atlas, source, (uint)upload.X, (uint)upload.Y, 0, (uint)width, (uint)height, 1, 0, (uint)upload.Page);
 
             // Upload only the one-pixel borders needed by linear filtering.
             // This avoids allocating a second padded copy of the whole texture.
@@ -715,8 +760,8 @@ public static class VulkanRasterRenderer
             uint[] bottom = new uint[width];
             Array.Copy(source, 0, top, 0, width);
             Array.Copy(source, (height - 1) * width, bottom, 0, width);
-            gd.UpdateTexture(atlas, top, (uint)upload.X, (uint)(upload.Y - 1), 0, (uint)width, 1, 1, 0, 0);
-            gd.UpdateTexture(atlas, bottom, (uint)upload.X, (uint)(upload.Y + height), 0, (uint)width, 1, 1, 0, 0);
+            gd.UpdateTexture(atlas, top, (uint)upload.X, (uint)(upload.Y - 1), 0, (uint)width, 1, 1, 0, (uint)upload.Page);
+            gd.UpdateTexture(atlas, bottom, (uint)upload.X, (uint)(upload.Y + height), 0, (uint)width, 1, 1, 0, (uint)upload.Page);
 
             uint[] left = new uint[height];
             uint[] right = new uint[height];
@@ -725,13 +770,13 @@ public static class VulkanRasterRenderer
                 left[y] = source[y * width];
                 right[y] = source[y * width + width - 1];
             }
-            gd.UpdateTexture(atlas, left, (uint)(upload.X - 1), (uint)upload.Y, 0, 1, (uint)height, 1, 0, 0);
-            gd.UpdateTexture(atlas, right, (uint)(upload.X + width), (uint)upload.Y, 0, 1, (uint)height, 1, 0, 0);
+            gd.UpdateTexture(atlas, left, (uint)(upload.X - 1), (uint)upload.Y, 0, 1, (uint)height, 1, 0, (uint)upload.Page);
+            gd.UpdateTexture(atlas, right, (uint)(upload.X + width), (uint)upload.Y, 0, 1, (uint)height, 1, 0, (uint)upload.Page);
 
-            gd.UpdateTexture(atlas, new[] { source[0] }, (uint)(upload.X - 1), (uint)(upload.Y - 1), 0, 1, 1, 1, 0, 0);
-            gd.UpdateTexture(atlas, new[] { source[width - 1] }, (uint)(upload.X + width), (uint)(upload.Y - 1), 0, 1, 1, 1, 0, 0);
-            gd.UpdateTexture(atlas, new[] { source[(height - 1) * width] }, (uint)(upload.X - 1), (uint)(upload.Y + height), 0, 1, 1, 1, 0, 0);
-            gd.UpdateTexture(atlas, new[] { source[source.Length - 1] }, (uint)(upload.X + width), (uint)(upload.Y + height), 0, 1, 1, 1, 0, 0);
+            gd.UpdateTexture(atlas, new[] { source[0] }, (uint)(upload.X - 1), (uint)(upload.Y - 1), 0, 1, 1, 1, 0, (uint)upload.Page);
+            gd.UpdateTexture(atlas, new[] { source[width - 1] }, (uint)(upload.X + width), (uint)(upload.Y - 1), 0, 1, 1, 1, 0, (uint)upload.Page);
+            gd.UpdateTexture(atlas, new[] { source[(height - 1) * width] }, (uint)(upload.X - 1), (uint)(upload.Y + height), 0, 1, 1, 1, 0, (uint)upload.Page);
+            gd.UpdateTexture(atlas, new[] { source[source.Length - 1] }, (uint)(upload.X + width), (uint)(upload.Y + height), 0, 1, 1, 1, 0, (uint)upload.Page);
             source = Array.Empty<uint>();
         }
     }
@@ -984,7 +1029,8 @@ public static class VulkanRasterRenderer
         IReadOnlyDictionary<TextureMap, RasterTexturePlacement> texturePlacements,
         bool useGpuTextureSampling)
     {
-        int renderableTriangleCount = 0;
+        int opaqueTriangleCount = 0;
+        int transparentTriangleCount = 0;
         int nearClippedTriangles = 0;
         Dictionary<Material, int> materialIds = new();
         List<RasterMaterial> materials = new();
@@ -997,7 +1043,11 @@ public static class VulkanRasterRenderer
                 continue;
             }
 
-            renderableTriangleCount++;
+            if (IsTransparentMaterial(triangle.Material))
+                transparentTriangleCount++;
+            else
+                opaqueTriangleCount++;
+
             if (!materialIds.ContainsKey(triangle.Material))
             {
                 RasterTexturePlacement basePlacement = useGpuTextureSampling
@@ -1015,9 +1065,12 @@ public static class VulkanRasterRenderer
                 RasterTexturePlacement occlusionPlacement = useGpuTextureSampling
                     ? TexturePlacement(texturePlacements, triangle.Material.OcclusionTexture)
                     : RasterTexturePlacement.None;
+                RasterTexturePlacement transmissionPlacement = useGpuTextureSampling
+                    ? TexturePlacement(texturePlacements, triangle.Material.TransmissionTexture)
+                    : RasterTexturePlacement.None;
                 materialIds.Add(triangle.Material, materials.Count);
                 materials.Add(new RasterMaterial(
-                    triangle.Material, basePlacement, mrPlacement, normalPlacement, emissivePlacement, occlusionPlacement));
+                    triangle.Material, basePlacement, mrPlacement, normalPlacement, emissivePlacement, occlusionPlacement, transmissionPlacement));
             }
         }
 
@@ -1025,7 +1078,8 @@ public static class VulkanRasterRenderer
         {
             MaterialIds = materialIds,
             Materials = materials.ToArray(),
-            RenderableTriangleCount = renderableTriangleCount,
+            OpaqueTriangleCount = opaqueTriangleCount,
+            TransparentTriangleCount = transparentTriangleCount,
             NearClippedTriangles = nearClippedTriangles,
             SourceTriangleCount = scene.Triangles.Count
         };
@@ -1161,7 +1215,7 @@ public static class VulkanRasterRenderer
         }
     }
 
-    private static TextureBuildResult BuildTextureAtlas(Scene scene, bool gpuTextureSamplingRequested)
+    private static TextureBuildResult BuildTextureAtlas(GraphicsDevice gd, Scene scene, bool gpuTextureSamplingRequested)
     {
         if (!gpuTextureSamplingRequested)
             return CreateBakedTextureResult(null);
@@ -1175,6 +1229,7 @@ public static class VulkanRasterRenderer
             AddTexture(triangle.Material.NormalTexture);
             AddTexture(triangle.Material.EmissiveTexture);
             AddTexture(triangle.Material.OcclusionTexture);
+            AddTexture(triangle.Material.TransmissionTexture);
         }
 
         void AddTexture(TextureMap? texture)
@@ -1192,57 +1247,86 @@ public static class VulkanRasterRenderer
                 Width = 1,
                 Height = 1,
                 TextureCount = 0,
+                PageCount = 1,
                 UsesGpuTextureSampling = true
             };
         }
 
         const int padding = 1;
+        const Veldrid.PixelFormat atlasFormat = Veldrid.PixelFormat.R8_G8_B8_A8_UNorm;
+        if (!gd.GetPixelFormatSupport(atlasFormat, TextureType.Texture2D, TextureUsage.Sampled, out PixelFormatProperties support))
+            throw new InvalidOperationException("The Vulkan device does not support sampled RGBA8 texture arrays.");
+
+        int maxPageWidth = checked((int)Math.Min((uint)int.MaxValue, support.MaxWidth));
+        int maxPageHeight = checked((int)Math.Min((uint)int.MaxValue, support.MaxHeight));
+        int maxPageCount = checked((int)Math.Min((uint)int.MaxValue, support.MaxArrayLayers));
+        if (maxPageWidth <= 0 || maxPageHeight <= 0 || maxPageCount <= 0)
+            throw new InvalidOperationException("The Vulkan device reported invalid sampled-texture array limits.");
+
         List<TextureMap> sorted = textures
-            .OrderByDescending(texture => texture.Height)
-            .ThenByDescending(texture => texture.Width)
+            .OrderByDescending(texture => Math.Max(texture.Width, texture.Height))
+            .ThenByDescending(texture => checked((long)Math.Max(1, texture.Width) * Math.Max(1, texture.Height)))
             .ToList();
+
         long totalArea = 0;
         int largestEntryWidth = 1;
+        int largestEntryHeight = 1;
         foreach (TextureMap texture in sorted)
         {
             int entryWidth = checked(Math.Max(1, texture.Width) + padding * 2);
             int entryHeight = checked(Math.Max(1, texture.Height) + padding * 2);
-            if (entryWidth > MaxTextureAtlasDimension || entryHeight > MaxTextureAtlasDimension)
-                return CreateBakedTextureResult($"a source texture exceeds {MaxTextureAtlasDimension}px");
+            if (entryWidth > maxPageWidth || entryHeight > maxPageHeight)
+            {
+                throw new InvalidOperationException(
+                    $"Texture '{texture.Name}' is {texture.Width}x{texture.Height}; with filtering borders it exceeds " +
+                    $"this Vulkan device's {maxPageWidth}x{maxPageHeight} sampled-texture limit.");
+            }
+
             totalArea = checked(totalArea + checked((long)entryWidth * entryHeight));
             largestEntryWidth = Math.Max(largestEntryWidth, entryWidth);
+            largestEntryHeight = Math.Max(largestEntryHeight, entryHeight);
         }
 
-        int estimatedWidth = Math.Max(largestEntryWidth, (int)Math.Ceiling(Math.Sqrt(Math.Max(1L, totalArea))));
-        estimatedWidth = Math.Min(MaxTextureAtlasDimension, estimatedWidth);
-
-        List<int> candidateWidths = new();
-        AddCandidate(estimatedWidth);
-        AddCandidate((int)Math.Ceiling(estimatedWidth * 1.25));
-        AddCandidate((int)Math.Ceiling(estimatedWidth * 1.5));
-        AddCandidate(estimatedWidth * 2);
-        AddCandidate(MaxTextureAtlasDimension);
+        List<int> candidateWidths = BuildDimensionCandidates(largestEntryWidth, maxPageWidth, totalArea);
+        List<int> candidateHeights = BuildDimensionCandidates(largestEntryHeight, maxPageHeight, totalArea);
 
         List<RasterTextureUpload>? bestUploads = null;
         int bestWidth = 0;
         int bestHeight = 0;
-        long bestArea = long.MaxValue;
+        int bestPageCount = 0;
+        long bestAllocatedPixels = long.MaxValue;
+        long bestLargestPage = long.MaxValue;
+
         foreach (int candidateWidth in candidateWidths)
         {
-            if (!TryPack(candidateWidth, out List<RasterTextureUpload> uploads, out int height))
-                continue;
-            long area = checked((long)candidateWidth * height);
-            if (area < bestArea)
+            foreach (int candidateHeight in candidateHeights)
             {
-                bestArea = area;
+                if (!TryPackPages(candidateWidth, candidateHeight, out List<RasterTextureUpload> uploads, out int pageCount))
+                    continue;
+
+                long pagePixels = checked((long)candidateWidth * candidateHeight);
+                long allocatedPixels = checked(pagePixels * pageCount);
+                if (allocatedPixels > bestAllocatedPixels ||
+                    (allocatedPixels == bestAllocatedPixels && pagePixels >= bestLargestPage))
+                {
+                    continue;
+                }
+
+                bestAllocatedPixels = allocatedPixels;
+                bestLargestPage = pagePixels;
                 bestWidth = candidateWidth;
-                bestHeight = height;
+                bestHeight = candidateHeight;
+                bestPageCount = pageCount;
                 bestUploads = uploads;
             }
         }
 
         if (bestUploads == null)
-            return CreateBakedTextureResult($"atlas exceeds {MaxTextureAtlasDimension}px");
+        {
+            throw new InvalidOperationException(
+                $"The scene's {textures.Count} textures cannot be packed into the Vulkan device's " +
+                $"{maxPageWidth}x{maxPageHeight}, {maxPageCount}-layer sampled-texture array limits.");
+        }
 
         Dictionary<TextureMap, RasterTexturePlacement> texturePlacements = new(bestUploads.Count);
         foreach (RasterTextureUpload upload in bestUploads)
@@ -1252,8 +1336,14 @@ public static class VulkanRasterRenderer
             float offsetY = (upload.Y + 0.5f) / bestHeight;
             float scaleX = texture.Width <= 1 ? 0.0f : (texture.Width - 1.0f) / bestWidth;
             float scaleY = texture.Height <= 1 ? 0.0f : (texture.Height - 1.0f) / bestHeight;
-            texturePlacements[texture] = new RasterTexturePlacement(offsetX, offsetY, scaleX, scaleY, texture);
+            texturePlacements[texture] = new RasterTexturePlacement(
+                offsetX, offsetY, scaleX, scaleY, upload.Page, texture);
         }
+
+        Stage(
+            $"Vulkan raster texture pages: {textures.Count} textures -> " +
+            $"{bestPageCount} layer(s) of {bestWidth}x{bestHeight}; " +
+            $"allocated={bestAllocatedPixels * 4.0 / (1024.0 * 1024.0):F1} MB");
 
         return new TextureBuildResult
         {
@@ -1262,52 +1352,104 @@ public static class VulkanRasterRenderer
             Width = bestWidth,
             Height = bestHeight,
             TextureCount = texturePlacements.Count,
+            PageCount = bestPageCount,
             UsesGpuTextureSampling = true
         };
 
-        void AddCandidate(int width)
+        List<int> BuildDimensionCandidates(int minimum, int maximum, long area)
         {
-            width = Math.Clamp(width, largestEntryWidth, MaxTextureAtlasDimension);
-            if (!candidateWidths.Contains(width))
-                candidateWidths.Add(width);
+            SortedSet<int> candidates = new();
+            AddCandidate(minimum);
+            AddCandidate(NextPowerOfTwo(minimum));
+
+            int squareEstimate = checked((int)Math.Min(int.MaxValue, Math.Ceiling(Math.Sqrt(Math.Max(1L, area)))));
+            AddCandidate(squareEstimate);
+            AddCandidate(NextPowerOfTwo(squareEstimate));
+
+            long power = NextPowerOfTwo(minimum);
+            while (power > 0 && power <= maximum)
+            {
+                AddCandidate((int)power);
+                if (power > int.MaxValue / 2)
+                    break;
+                power *= 2;
+            }
+
+            // The physical device limit is included as a last-resort candidate;
+            // the score still chooses the smallest total allocation that fits.
+            AddCandidate(maximum);
+            return candidates.ToList();
+
+            void AddCandidate(int value)
+            {
+                if (value < minimum)
+                    value = minimum;
+                if (value > maximum)
+                    value = maximum;
+                candidates.Add(value);
+            }
         }
 
-        bool TryPack(int atlasWidth, out List<RasterTextureUpload> uploads, out int atlasHeight)
+        bool TryPackPages(int pageWidth, int pageHeight, out List<RasterTextureUpload> uploads, out int pageCount)
         {
             uploads = new List<RasterTextureUpload>(sorted.Count);
+            int page = 0;
             int cursorX = 0;
             int cursorY = 0;
             int rowHeight = 0;
+
             foreach (TextureMap texture in sorted)
             {
                 int entryWidth = checked(Math.Max(1, texture.Width) + padding * 2);
                 int entryHeight = checked(Math.Max(1, texture.Height) + padding * 2);
-                if (cursorX > 0 && cursorX + entryWidth > atlasWidth)
+
+                if (cursorX > 0 && cursorX + entryWidth > pageWidth)
                 {
                     cursorY = checked(cursorY + rowHeight);
                     cursorX = 0;
                     rowHeight = 0;
                 }
 
-                if ((long)cursorY + entryHeight > MaxTextureAtlasDimension)
+                if (cursorY + entryHeight > pageHeight)
                 {
-                    atlasHeight = 0;
-                    uploads.Clear();
-                    return false;
+                    page++;
+                    if (page >= maxPageCount)
+                    {
+                        pageCount = 0;
+                        uploads.Clear();
+                        return false;
+                    }
+                    cursorX = 0;
+                    cursorY = 0;
+                    rowHeight = 0;
                 }
 
                 uploads.Add(new RasterTextureUpload
                 {
                     Texture = texture,
                     X = cursorX + padding,
-                    Y = cursorY + padding
+                    Y = cursorY + padding,
+                    Page = page
                 });
                 cursorX = checked(cursorX + entryWidth);
                 rowHeight = Math.Max(rowHeight, entryHeight);
             }
 
-            atlasHeight = Math.Max(1, checked(cursorY + rowHeight));
-            return atlasHeight <= MaxTextureAtlasDimension;
+            pageCount = page + 1;
+            return pageCount <= maxPageCount;
+        }
+
+        static int NextPowerOfTwo(int value)
+        {
+            if (value <= 1)
+                return 1;
+            uint v = checked((uint)value - 1u);
+            v |= v >> 1;
+            v |= v >> 2;
+            v |= v >> 4;
+            v |= v >> 8;
+            v |= v >> 16;
+            return v >= 0x7fffffffu ? int.MaxValue : checked((int)(v + 1u));
         }
     }
 
@@ -1318,6 +1460,7 @@ public static class VulkanRasterRenderer
         Width = 1,
         Height = 1,
         TextureCount = 0,
+        PageCount = 1,
         UsesGpuTextureSampling = false,
         FallbackReason = reason
     };
@@ -1505,6 +1648,10 @@ struct RasterMaterial
     vec4 OcclusionAtlasTransform;
     vec4 OcclusionTextureAddress;
     vec4 OcclusionTextureTransform;
+
+    vec4 TransmissionAtlasTransform;
+    vec4 TransmissionTextureAddress;
+    vec4 TransmissionTextureTransform;
 };
 
 layout(location = 0) in vec3 fsWorldPos;
@@ -1534,7 +1681,7 @@ layout(std430, set = 0, binding = 2) readonly buffer MaterialBuffer
     RasterMaterial Materials[];
 };
 
-layout(set = 0, binding = 3) uniform texture2D AtlasTexture;
+layout(set = 0, binding = 3) uniform texture2DArray AtlasTexture;
 layout(set = 0, binding = 4) uniform sampler AtlasSampler;
 
 float addressTexture(float v, float mode)
@@ -1570,7 +1717,7 @@ vec4 sampleAtlasTexture(vec2 uv, vec4 atlasTransform, vec4 textureAddress, vec4 
 {
     vec2 addressed = addressUv(uv, textureAddress, textureTransform);
     vec2 atlasUv = atlasTransform.xy + addressed * atlasTransform.zw;
-    return texture(sampler2D(AtlasTexture, AtlasSampler), atlasUv);
+    return texture(sampler2DArray(AtlasTexture, AtlasSampler), vec3(atlasUv, textureAddress.w));
 }
 
 float srgbChannelToLinear(float value)
@@ -1695,16 +1842,36 @@ void main()
     bool hasNormal = material.TextureFlags.z > 0.5;
     bool hasEmissive = material.TextureFlags.w > 0.5;
     bool hasOcclusion = material.TextureFlags2.x > 0.5;
+    bool hasTransmissionTexture = material.TextureFlags2.y > 0.5;
 
     vec4 baseTexel = hasBase
         ? sampleAtlasTexture(fsUv, material.BaseAtlasTransform, material.BaseTextureAddress, material.BaseTextureTransform)
         : vec4(1.0);
     vec3 baseColor = material.BaseColorAlpha.rgb * (hasBase ? srgbToLinear(baseTexel.rgb) : vec3(1.0));
-    float alpha = material.BaseColorAlpha.a * baseTexel.a;
+    float sourceAlpha = material.BaseColorAlpha.a * baseTexel.a;
+    float alpha = sourceAlpha;
+    float transmission = clamp(material.AlphaFlags.w, 0.0, 1.0);
+    if (hasTransmissionTexture)
+    {
+        float sampledTransmission = sampleAtlasTexture(
+            fsUv,
+            material.TransmissionAtlasTransform,
+            material.TransmissionTextureAddress,
+            material.TransmissionTextureTransform).r;
+        transmission *= sampledTransmission;
+    }
     int alphaMode = int(material.AlphaFlags.x + 0.5);
     if (alphaMode == 0)
         alpha = 1.0;
     else if (alphaMode == 1 && alpha < material.AlphaFlags.y)
+        discard;
+
+    // The shared rasterizer disables fixed-function culling so double-sided
+    // materials remain possible. Respect glTF single-sided semantics here for
+    // transparent surfaces; otherwise every back face is alpha blended too and
+    // thin stained-glass meshes quickly accumulate toward white.
+    bool transparentSurface = alphaMode == 2 || transmission > 0.001;
+    if (transparentSurface && material.AlphaFlags.z < 0.5 && !gl_FrontFacing)
         discard;
 
     vec4 mrTexel = hasMr
@@ -1886,8 +2053,28 @@ void main()
     }
 
     vec3 linearColor = directLighting + indirectLighting + emissive;
+
+    // Vulkan raster has no resolved scene-color texture to refract. Approximate
+    // glTF transmission by reducing the opaque surface response and blending a
+    // colored transmitted-light term over the already rendered scene. This is
+    // intentionally lightweight, but preserves stained-glass color instead of
+    // turning transmission materials into opaque white PBR surfaces.
+    if (transmission > 0.001)
+    {
+        vec3 glassTint = mix(vec3(1.0), baseColor, 0.78);
+        vec3 transmittedLight = glassTint * (vec3(0.08) + diffuseEnvironment(-normal) * 0.42);
+        linearColor = mix(linearColor, transmittedLight + emissive, transmission * 0.82);
+    }
+
+    float outputAlpha = alphaMode == 2 ? alpha : 1.0;
+    if (transmission > 0.001)
+    {
+        float coverageAlpha = alphaMode == 2 ? alpha : sourceAlpha;
+        outputAlpha = clamp(coverageAlpha * (1.0 - transmission * 0.72), 0.035, 0.98);
+    }
+
     vec3 outputColor = linearToSrgb(pbrNeutralToneMap(linearColor));
-    outColor = vec4(outputColor, alphaMode == 2 ? alpha : 1.0);
+    outColor = vec4(outputColor, outputAlpha);
 }
 ";
 }

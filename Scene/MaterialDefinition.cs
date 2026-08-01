@@ -21,6 +21,7 @@ public sealed class MaterialDefinition
     public double NormalScale { get; set; } = 1.0;
     public string? OcclusionTextureId { get; set; }
     public double OcclusionStrength { get; set; } = 1.0;
+    public string? TransmissionTextureId { get; set; }
     public Vec3 EmissiveColor { get; set; } = new(1, 1, 1);
     public string? EmissiveTextureId { get; set; }
     public double EmissiveStrength { get; set; }
@@ -47,6 +48,7 @@ public sealed class MaterialDefinition
             NormalScale = material.NormalScale,
             OcclusionTextureId = material.OcclusionTexture?.Name,
             OcclusionStrength = material.OcclusionStrength,
+            TransmissionTextureId = material.TransmissionTexture?.Name,
             EmissiveColor = material.EmissionColor,
             EmissiveTextureId = material.EmissiveTexture?.Name,
             EmissiveStrength = material.Emission,
@@ -64,11 +66,13 @@ public sealed class MaterialDefinition
         TextureMap? emissiveTexture = null,
         TextureMap? metallicRoughnessTexture = null,
         TextureMap? normalTexture = null,
-        TextureMap? occlusionTexture = null)
+        TextureMap? occlusionTexture = null,
+        TextureMap? transmissionTexture = null)
     {
         return new Material(
             BaseColor, EmissiveStrength, null, baseColorTexture, EmissiveColor, emissiveTexture,
             Opacity, AlphaBlend, Metallic, Roughness, Transmission, metallicRoughnessTexture,
-            normalTexture, occlusionTexture, NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided);
+            normalTexture, occlusionTexture, NormalScale, OcclusionStrength, AlphaMode, AlphaCutoff, DoubleSided,
+            transmissionTexture);
     }
 }

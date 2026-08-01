@@ -291,7 +291,7 @@ public static class GltfSceneIO
                             material.EmissionColor, material.EmissiveTexture, material.Alpha, material.AlphaBlend,
                             material.Metallic, material.Roughness, material.Transmission, material.MetallicRoughnessTexture,
                             material.NormalTexture, material.OcclusionTexture, material.NormalScale, material.OcclusionStrength,
-                            material.AlphaMode, material.AlphaCutoff, material.DoubleSided);
+                            material.AlphaMode, material.AlphaCutoff, material.DoubleSided, material.TransmissionTexture);
                     }
                     if (ia < normals.Count && ib < normals.Count && ic < normals.Count)
                     {
@@ -605,6 +605,7 @@ public static class GltfSceneIO
             TextureMap? metallicRoughnessTexture = null;
             TextureMap? normalTexture = null;
             TextureMap? occlusionTexture = null;
+            TextureMap? transmissionTexture = null;
             double normalScale = 1.0;
             double occlusionStrength = 1.0;
             int baseColorTexCoord = 0;
@@ -719,10 +720,22 @@ public static class GltfSceneIO
 
             if (mat.TryGetProperty("extensions", out JsonElement matExt))
             {
-                if (matExt.TryGetProperty("KHR_materials_transmission", out JsonElement transmissionExt) &&
-                    transmissionExt.TryGetProperty("transmissionFactor", out JsonElement transmissionEl))
+                if (matExt.TryGetProperty("KHR_materials_transmission", out JsonElement transmissionExt))
                 {
-                    transmission = transmissionEl.GetDouble();
+                    if (transmissionExt.TryGetProperty("transmissionFactor", out JsonElement transmissionEl))
+                        transmission = transmissionEl.GetDouble();
+
+                    if (transmissionExt.TryGetProperty("transmissionTexture", out JsonElement transmissionTextureEl) &&
+                        transmissionTextureEl.TryGetProperty("index", out JsonElement transmissionTextureIndexEl))
+                    {
+                        int textureIndex = transmissionTextureIndexEl.GetInt32();
+                        if (!textureCache.TryGetValue(textureIndex, out transmissionTexture))
+                        {
+                            transmissionTexture = TryReadTexture(root, buffers, sceneFilePath, textureIndex);
+                            textureCache[textureIndex] = transmissionTexture;
+                        }
+                        transmissionTexture = ApplyTextureTransform(transmissionTexture, transmissionTextureEl);
+                    }
                 }
                 if (matExt.TryGetProperty("KHR_materials_ior", out JsonElement iorExt) &&
                     iorExt.TryGetProperty("ior", out JsonElement _))
@@ -736,7 +749,8 @@ public static class GltfSceneIO
                 alpha: alphaMode == MaterialAlphaMode.Opaque ? 1.0 : alpha, alphaBlend: alphaBlend, metallic: metallic, roughness: roughness, transmission: transmission,
                 metallicRoughnessTexture: metallicRoughnessTexture, normalTexture: normalTexture, occlusionTexture: occlusionTexture,
                 normalScale: normalScale, occlusionStrength: occlusionStrength, alphaMode: alphaMode,
-                alphaCutoff: alphaCutoff, doubleSided: doubleSided), baseColorTexCoord));
+                alphaCutoff: alphaCutoff, doubleSided: doubleSided,
+                transmissionTexture: transmissionTexture), baseColorTexCoord));
         }
         return result;
     }
